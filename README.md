@@ -440,8 +440,55 @@ somewhere to land:
 numbered list — because it was the only free text a plan carried. That put
 `1. Attend the dentist appointment at 3pm` into the user's calendar as the event's
 description: a restatement of the request, in the field meant for what the event is.
-The schema no longer requires steps for an event, and the description carries the
-detail instead.
+The schema no longer requires steps for an event, and any steps a model volunteers
+are dropped.
+
+### Which fields the model fills, and which are derived
+
+Probed against the live 4B model, this model reliably fills `title`, `due_at` and
+`location`, and **never** fills `description` or `attendees`. The detail therefore
+had nowhere to go and ended up in the title instead:
+
+> `Dentist Appointment with Dr Ada Okafor`
+
+as the event's headline.
+
+Three attempts were made to fix that in the prompt, and the last one made things
+worse:
+
+| Attempt | Result |
+| --- | --- |
+| Describe the fields better | Ignored |
+| Say so again, more firmly | Ignored |
+| Reject the plan and name what was lost | **Worse** — the retry dumped the whole request into the title and filled *less* |
+
+So `attendees` is derived in code when the model leaves it empty, by taking the
+person the request named after "with" or "meet", stopping at the next clause so
+"dinner with Sam at the Italian place" yields `Sam` and not the restaurant.
+
+Two properties make this safe:
+
+- It only reads words the **user typed**, so it cannot invent anyone. That is the
+  failure that matters, because this text lands in somebody's real calendar.
+- It is a **fallback, not an override**. A model-supplied attendee is left alone.
+
+And it is reported in the plan's notes rather than applied silently, because a
+plan that was partly derived should not look exactly like one the model produced.
+
+`description` is deliberately **not** derived. Building a sentence from a
+word-by-word scrape of the request would produce plausible-looking prose with no
+way to check it, which is worse than an empty field the user can see.
+
+### A worked example
+
+```
+Request:  "dentist appointment next Friday at 3pm with Dr Ada Okafor at Reception on Fifth Street"
+
+Google:    Dentist Appointment
+           Fri 16 Oct, 15:00 (Europe/London)
+           Reception on Fifth Street
+           Guests: Dr Ada Okafor
+```
 
 On failure the error includes Google's **complete raw response** alongside the
 request id. Google's own messages name none of the fields that actually caused

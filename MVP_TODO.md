@@ -241,9 +241,18 @@
 * [ ] **Relative dates beyond this week.** The planner prompt carries the next two
       occurrences of each weekday. "In three weeks" or "next month" is still resolved
       by the model, and a request naming only a month has no rule at all.
+* [x] **Event detail.** The plan carries description, location and attendees and the
+      encoder reads all three. The model fills location reliably and never fills
+      attendees, so attendees are derived from the request when it leaves them empty —
+      from words the user typed, so no name can be invented.
+* [ ] **`description` is almost never populated.** The model will not fill it and it is
+      deliberately not derived: a sentence assembled by scraping the request is
+      plausible-looking prose with nothing to check it against, which is worse than an
+      empty field the user can see. The detail is carried structurally by location and
+      attendees instead. Worth revisiting if a larger model can be trusted with it.
 * [ ] **The routing table is a snapshot, not a model.** It covers errands and
-      appointments. A request naming neither falls through to the model, which is
-      the right default but means a new kind of request has no rule until someone
+      appointments. A request naming neither falls through to the model, which is the
+      right default but means a new kind of request has no rule until someone
       adds one. Rows are deliberately few and specific.
 * [ ] **Retrieval quality is unmeasured.** The path works and is tenant-safe, but
       there is no labelled query set, so the similarity floor and `top_k` are

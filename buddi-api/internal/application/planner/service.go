@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -394,17 +395,17 @@ func buildSchema() json.RawMessage {
 			},
 			"title": map[string]any{
 				"type": "string",
-				"description": "A short noun phrase naming the item. Never an instruction and never a " +
-					"restatement of the request: \"Dentist Appointment\", not \"Book Dentist " +
-					"Appointment\". Never a sentence.",
+				"description": "A short noun phrase naming only the kind of event, at most 60 " +
+					"characters. Never an instruction, never a sentence, and never a person's " +
+					"name: a named person belongs in attendees.",
 				"maxLength": maxTitleLength,
 			},
 			"description": map[string]any{
 				"type": "string",
-				"description": "One short line of useful detail about the item, written for someone " +
-					"reading it later. For an event this is the point of it, not the steps: " +
-					"\"Annual check-up with Dr Ada Okafor\". For a task it is what done looks " +
-					"like. Leave empty when there is genuinely nothing to add.",
+				"description": "One useful line about the item, written for someone reading it " +
+					"later. For an event it says what the event is for and who it involves. " +
+					"Never a list of steps and never the request restated. Leave it empty only " +
+					"when the request said nothing beyond a subject and a time.",
 			},
 			"priority": map[string]any{
 				"type": "string",
@@ -424,10 +425,11 @@ func buildSchema() json.RawMessage {
 					"or a room.",
 			},
 			"attendees": map[string]any{
-				"type":        "array",
-				"description": "People a calendar_event involves, only if the user named them.",
-				"items":       map[string]any{"type": "string", "maxLength": maxAttendeeLength},
-				"maxItems":    maxAttendees,
+				"type": "array",
+				"description": "Every person the request names, and nobody the request does not. A " +
+					"person named in the request belongs here rather than in the title.",
+				"items":    map[string]any{"type": "string", "maxLength": maxAttendeeLength},
+				"maxItems": maxAttendees,
 			},
 			"steps": map[string]any{
 				"type": "array",
@@ -587,7 +589,7 @@ func (s *Service) PlanIn(
 			break
 		}
 
-		plan, fatal, notes := s.parsePlan(res.Text, loc)
+		plan, fatal, notes := s.parsePlan(res.Text, trimmedGoal, loc)
 
 		// Checked after parsing and before the plan is accepted, because a date on the
 		// wrong weekday is the kind of mistake that looks entirely well formed: a valid
@@ -669,16 +671,16 @@ Routing:
 %s
 Rules:
 - intent: %s
-- title: the subject of the item, as a noun phrase, at most %d characters. Not an instruction: "Dentist Appointment", never "Book Dentist Appointment". Never a sentence.
+- title: the subject of the item, as a noun phrase naming only the kind of event, at most %d characters. Not an instruction: "Dentist Appointment", never "Book Dentist Appointment". Never a sentence, and never a person's name.
 - priority: one of the values the schema lists.
 - due_at: an RFC3339 timestamp. It is the deadline for a task, and the start time for a calendar_event.
-- description: one useful line about the item. For an event, the point of it: "Annual check-up with Dr Ada Okafor". Never a list of steps and never the request restated.
+- description: one useful line about the item, for someone reading it later. For an event it says what the event is for and who it involves. Never a list of steps and never the request restated. Leave it empty only when the request said nothing beyond a subject and a time.
 - location: only if the user said where. Otherwise leave it empty rather than guessing a building or a room.
-- attendees: only the people the user named. Leave empty otherwise.
+- attendees: every person the request names, and nobody it does not. A person named in the request belongs here, not in the title.
 - steps: what a person actually does, in order, for a task. Leave empty for a calendar_event. An appointment is not a sequence of actions, so a step such as "attend the dentist" says nothing.
 - question: only when intent is clarification. Name what is missing and make it answerable in a sentence: "Which doctor are you seeing?"
 %s
-Populate a field only when the request supports it. Never invent a value, and never copy wording from these instructions into a field.
+Populate a field only when the request supports it. Never invent a value, and never copy wording from these instructions into a field. Any name, place or detail you put in a field must come from the request itself.
 Never mention a date in the title or the steps. Dates belong only in due_at.
 
 Request: %s`, dateContext(s.now(), loc), routingBlock(route), route.Intent, maxTitleLength, contextBlock(chunks), goal)
@@ -1101,6 +1103,72 @@ func reanchorDueAt(due *time.Time, loc *time.Location) (*time.Time, bool) {
 	return &anchored, true
 }
 
+// namedPerson finds a person the request names, given as a name after "with" or "meet".
+//
+// It is a deliberate, small extraction rather than a general one. Two properties make it
+// safe: it only fires on words the user actually typed, so it cannot invent anyone, and
+// it is only consulted when the model has already declined to put the name anywhere. The
+// worst case is a person also appearing in the title, which is redundant rather than
+// wrong.
+func namedPerson(text string) (string, bool) {
+	for _, lead := range []string{" with ", " meet ", " meeting with "} {
+		index := strings.Index(text, lead)
+		if index < 0 {
+			continue
+		}
+
+		rest := strings.TrimSpace(text[index+len(lead):])
+
+		// Stop at the first word that starts a new clause, so "with Sam at the Italian
+		// place" yields the person and not the rest of the sentence.
+		cut := len(rest)
+
+		for _, stop := range []string{" at ", " on ", " in ", " for ", " to ", " about ", " and "} {
+			if found := strings.Index(rest, stop); found >= 0 && found < cut {
+				cut = found
+			}
+		}
+
+		candidate := strings.TrimSpace(rest[:cut])
+
+		// A single stop word or a bare "me" is not a name.
+		if candidate == "" || candidate == "me" || candidate == "us" ||
+			strings.ContainsAny(candidate, "0123456789") {
+			return "", false
+		}
+
+		words := strings.Fields(candidate)
+
+		if len(words) > 5 {
+			candidate = strings.Join(words[:5], " ")
+		}
+
+		return candidate, true
+	}
+
+	return "", false
+}
+
+// capitaliseWords upper-cases the first letter of each word.
+//
+// Extracted names arrive lower-cased, because the matcher runs against a lower-cased copy
+// of the request, and "dr ada okafor" would look like a typo in a calendar the user owns.
+func capitaliseWords(s string) string {
+	fields := strings.Fields(s)
+
+	for i, field := range fields {
+		runes := []rune(field)
+		if len(runes) == 0 {
+			continue
+		}
+
+		runes[0] = unicode.ToUpper(runes[0])
+		fields[i] = string(runes)
+	}
+
+	return strings.Join(fields, " ")
+}
+
 // staleDueTolerance is how far into the past a due date may sit and still be
 // kept. A newly created task due yesterday is almost always the model guessing
 // at a relative date rather than a user recording something retrospective, and
@@ -1123,7 +1191,7 @@ const artefactDueWindow = 5 * time.Minute
 // usable content is fatal. A malformed optional field is dropped and noted,
 // because discarding an otherwise good plan over a bad due date wastes a retry
 // and, in a live run, turned a good plan into a fallback on every attempt.
-func (s *Service) parsePlan(raw string, loc *time.Location) (*Plan, []string, []string) {
+func (s *Service) parsePlan(raw string, goal string, loc *time.Location) (*Plan, []string, []string) {
 	var (
 		fatal []string
 		notes []string
@@ -1232,6 +1300,26 @@ func (s *Service) parsePlan(raw string, loc *time.Location) (*Plan, []string, []
 		plan.Attendees = nil
 	}
 
+	// The model fills title, due_at and location reliably and leaves description and
+	// attendees empty, every time, across repeated probes. Telling it to was tried
+	// twice and a retry complaint was tried as well — the complaint was worse, because a
+	// second attempt with the plan rejected dumped the whole request into the title and
+	// filled less than the first.
+	//
+	// So the two fields it will not fill are filled from the request here, and only when
+	// the model left them empty. Both read words the user actually typed, so neither can
+	// invent a detail — which is the failure that matters, since this text lands in
+	// somebody's real calendar.
+	if plan.Intent == domain.PlanIntentCalendarEvent {
+		if len(plan.Attendees) == 0 {
+			if person, ok := namedPerson(lowerASCII(goal)); ok {
+				plan.Attendees = []string{capitaliseWords(person)}
+				notes = append(notes, fmt.Sprintf(
+					"attendees was filled from the request as %q, because the model left it empty", person))
+			}
+		}
+	}
+
 	priority := domain.TaskPriority(strings.ToLower(strings.TrimSpace(candidate.Priority)))
 
 	switch {
@@ -1328,6 +1416,16 @@ func (s *Service) parsePlan(raw string, loc *time.Location) (*Plan, []string, []
 		plan.Steps = nil
 		plan.Location = ""
 		plan.Attendees = nil
+	}
+
+	// An event keeps no steps. The schema no longer asks for them, but the model
+	// volunteers one often enough to matter, and a step on an appointment is a
+	// restatement of the request rather than anything to do.
+	if plan.Intent == domain.PlanIntentCalendarEvent && len(plan.Steps) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"%d step(s) were dropped: an appointment is not a sequence of actions", len(plan.Steps)))
+
+		plan.Steps = nil
 	}
 
 	if len(fatal) > 0 {
