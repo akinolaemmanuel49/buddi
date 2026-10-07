@@ -813,7 +813,7 @@ func nextWeekReference(goal string) bool {
 // It exists so the check can name one exact date rather than a day name. The complaint
 // goes back into the retry prompt, and "the request asked for Friday" is not actionable
 // when two Fridays are in play.
-func resolveWeekday(now time.Time, loc *time.Location, goal string, day time.Weekday) time.Time {
+func resolveWeekday(now time.Time, goal string, day time.Weekday) time.Time {
 	target := nextOccurrence(now, day)
 
 	if nextWeekReference(goal) {
@@ -995,7 +995,7 @@ func (s *Service) checkWeekday(goal string, loc *time.Location, plan *Plan) stri
 		return ""
 	}
 
-	expected := resolveWeekday(local, loc, goal, found)
+	expected := resolveWeekday(local, goal, found)
 
 	if planned.Year() == expected.Year() && planned.Month() == expected.Month() &&
 		planned.Day() == expected.Day() {

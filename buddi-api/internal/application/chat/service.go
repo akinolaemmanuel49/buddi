@@ -571,7 +571,7 @@ func (s *Service) planTurn(
 ) (*Result, error) {
 	// A reply to a pending question is planned against the request the question was
 	// about, not against the reply alone.
-	request, err := s.resolvePendingRequest(ctx, userID, conversation, question, content)
+	request, err := s.resolvePendingRequest(ctx, userID, question, content)
 	if err != nil {
 		return nil, err
 	}
@@ -700,7 +700,6 @@ func (s *Service) clarifyTurn(
 func (s *Service) resolvePendingRequest(
 	ctx context.Context,
 	userID uuid.UUID,
-	conversation *domain.Conversation,
 	question *domain.Message,
 	content string,
 ) (string, error) {
@@ -710,9 +709,6 @@ func (s *Service) resolvePendingRequest(
 
 	parent, err := s.messages.GetByID(ctx, userID, *question.ParentID)
 	if err != nil {
-		// The parent was read a moment ago to record this message, so a miss here is
-		// not a normal condition and treating it as one would silently plan from the
-		// wrong text.
 		return "", err
 	}
 
@@ -722,11 +718,6 @@ func (s *Service) resolvePendingRequest(
 
 	pending := strings.TrimSpace(*parent.ClarificationRequest)
 
-	// Clear the marker now that it has been answered.
-	//
-	// Leaving it set would keep the thread looking like it was waiting for a reply to a
-	// question already answered, so a reloaded transcript would offer a second reply box
-	// against the same question.
 	parent.ClarificationRequest = nil
 
 	if err := s.messages.Update(ctx, parent); err != nil {

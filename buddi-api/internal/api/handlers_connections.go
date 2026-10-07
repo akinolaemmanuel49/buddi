@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -290,26 +289,4 @@ func toConnectionResponse(connection oauth.Connection) connectionResponse {
 	}
 
 	return response
-}
-
-// splitScopes turns a space-delimited scope string into a list, because that is how
-// Google sends it and a list is what a client can render.
-func splitScopes(raw string) []string {
-	fields := splitFields(raw)
-	scopes := make([]string, 0, len(fields))
-
-	for _, field := range fields {
-		if field != "" {
-			scopes = append(scopes, field)
-		}
-	}
-
-	return scopes
-}
-
-// splitFields splits on whitespace of any kind.
-func splitFields(raw string) []string {
-	return strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ' ' || r == ',' || r == '\t' || r == '\n'
-	})
 }
