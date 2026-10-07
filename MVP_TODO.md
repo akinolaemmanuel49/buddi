@@ -212,16 +212,41 @@
       dev server proxies `/api` to the API so the browser never needs CORS.
       Verified end to end: register (201) and authenticated `/auth/me` (200) via
       the proxy.
-* [x] Implement basic request/chat interface. A goal box that posts to
-      `POST /agent/runs`, holding the button while planning runs synchronously.
-* [x] Display responses. Plan card (title, priority, steps) with the two honesty
-      labels surfaced rather than inferred: `grounding_state` and `plan_fallback`.
+* [x] Implement basic request/chat interface. Superseded by a full chat
+      transcript — see 11.3 and 11.4 in `DECISIONS.md`. The goal box and run
+      timeline were removed rather than kept alongside the transcript.
+* [x] Display responses. Streamed token by token over SSE, with the reasoning
+      panel omitted entirely when the model reports none rather than shown empty.
 * [x] Display approval requests. Each approval shows its tool, rationale and the
       exact stored argument bytes (`arguments` is rendered as raw JSON), which is
-      what the user is being asked to approve.
+      what the user is being asked to approve. Rendered from each message's own
+      `run_id`, so a card cannot outlive or precede the plan it belongs to.
 * [x] Allow approval/rejection. Approve and reject resolve the approval and
       replace the run in place, so the timeline reflects the decision without a
       full reload.
+* [x] Keep the conversation. Threads list newest-first, messages form a tree via
+      `parent_id`, and revising a message inserts a revision that supersedes the
+      original rather than overwriting it.
+* [x] Dark and light themes, persisted, with a single-scroll layout and a
+      collapsible sidebar.
+* [x] Google Calendar connection panel. Connect, show status, and disconnect,
+      driven by the connection endpoints.
+
+### Known gaps
+
+* [ ] **No user timezone.** Dates and times are handled and stored in UTC, so an
+      evening event can render on the wrong local day. This is the most likely
+      remaining cause of a "wrong date" report and it is a real bug rather than
+      a display artifact. Highest-priority open item.
+* [ ] **Relative dates beyond this week.** The planner prompt carries an explicit
+      table of the coming week. "In three weeks" or "next month" is still resolved
+      by the model. Extending the table is cheap; extending it *and* validating
+      it is the correct fix.
+* [ ] **Retrieval quality is unmeasured.** The path works and is tenant-safe, but
+      there is no labelled query set, so the similarity floor and `top_k` are
+      reasoned defaults rather than tuned values.
+* [ ] **Plan steps still restate the request.** Titles are steered towards noun
+      phrases; steps remain close to a paraphrase of the user's own words.
 
 ---
 
@@ -369,10 +394,11 @@ over a real JSON-RPC session: the calendar connector is an MCP server reached ov
 in-process pipe, and an approval-flow integration test asserts that the bytes on the
 wire equal the bytes the user approved.
 
-Google credentials are the remaining boundary. The OAuth store, cipher and refresh
-path are implemented and live-verified against a database; the Google consent
-exchange and the calendar calls themselves are the one outward step, still exercised
-only against fakes until real credentials are introduced.
+Google credentials are in place and the consent exchange and calendar calls are
+live-verified: an event was created successfully. Two caveats remain. Google's
+**Testing** mode expires refresh tokens after seven days, so the connector needs
+reconnecting roughly weekly until the app is verified. And times are sent in UTC,
+which is the one place a still-wrong date can come from (see Known gaps).
 
 The one capability that is demonstrated but not yet trustworthy in the way this
 document asks for is retrieval quality. The path works, is tenant-safe, and reports
@@ -380,8 +406,9 @@ its own grounding honestly. Whether it retrieves *well* is unmeasured: there is 
 labelled query set, so the similarity floor and `top_k` are reasoned defaults rather
 than tuned values.
 
-Roughly: the system is functionally complete for a local single-user MVP with a
-grounding-labelled planner, an approval-gated calendar connector over MCP, and
-encrypted credentials at rest, minus a retrieval evaluation and minus any UI. The
-open risks are all "we have not measured this" or "credentials not yet introduced",
+Roughly: the system is functionally complete for a local single-user MVP — a
+streaming chat transcript, a grounding-labelled planner, an approval-gated
+calendar connector over MCP, and encrypted credentials at rest — minus a
+retrieval evaluation and minus user timezone support. The open risks are
+"we have not measured this" and "we have not modelled the user's timezone",
 not "this is broken".

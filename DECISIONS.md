@@ -48,21 +48,67 @@ handlers should not pay for model weights they never load.
 
 ## 2. Model and inference
 
-### 2.1 `qwen3:0.6b` as the only general model
+### 2.1 `qwen3:4b-instruct-2507-q4_K_M` as the only general model
 
-**Context.** The target machine has no GPU. Ollama reported roughly 7.4 GiB of
-memory in use across the service, and CPU inference runs at roughly 20–50
-tokens/second with thinking disabled, about 2.5 tokens/second while thinking.
+**Context.** This was originally `qwen3:0.6b`, chosen on the reasoning that the
+target machine has no GPU, Ollama reported roughly 7.4 GiB in use across the
+service, and a larger model would not fit alongside the embedding model in
+shared RAM. That reasoning was sound and the conclusion was wrong.
 
-**Decision.** Use `qwen3:0.6b` for planning. Do not add a larger tier.
+**Decision.** Use `qwen3:4b-instruct-2507-q4_K_M` at `num_ctx 16384`, roughly
+2.5 GB resident. Do not add a larger tier.
 
-**Why.** Memory, not ambition, sets the ceiling. A larger model would not fit
-alongside the embedding model in shared RAM. Choosing the small model
-deliberately, rather than as a stopgap, keeps the memory budget honest and makes
-its quality limits something we design around instead of discover later.
+**Why.** The first symptom was not quality in the abstract but a *specific*
+failure: `qwen3:0.6b` cannot resolve relative dates. Asked on a Wednesday for an
+appointment "on Friday at 3pm" it answered with a Thursday eight days out, and
+that wrong date was written to the user's calendar. A model that is fast but
+silently produces a wrong date is worse than a slower model that produces a right
+one, because nothing in the response signals the error.
 
-**Revisit when.** A machine with a GPU, or a demonstrated need the 0.6b model
-cannot meet.
+The 4B *thinking* variant was the obvious next step and it failed too: 138–162
+seconds, and twice the whole token budget spent on reasoning before any plan came
+back. The instruct variant of the same 4B weights answers in roughly 12 seconds
+with materially better dates. Speed was never the binding constraint —
+correctness was — so the memory argument never applied.
+
+Measured after the change: a 4B model at `num_ctx 16384` fits inside the same
+7.4 GiB ceiling, because the KV cache and the embedding model are the binding
+constraints rather than the weights.
+
+**Revisit when.** A machine with a GPU, or a need this model cannot meet. Revisit
+the 0.6b option only if it can be shown to produce correct dates, since that was
+the entire reason it was replaced.
+
+### 2.1a The prompt offers a date table rather than trusting the model to count
+
+**Context.** The model cannot do calendar arithmetic. It did not matter what it
+was told, because the arithmetic was still being done by the thing least able to
+do it.
+
+**Decision.** The planning prompt carries an explicit table of the coming week's
+dates, and the model is instructed to *choose* a date from that table rather than
+compute one. As a second line of defence, a `calendar_event` plan whose date falls
+on a different weekday than the request named is rejected and retried, with the
+retry prompt naming the correct date.
+
+**Why.** This is arithmetic the runtime can do exactly and the model cannot.
+Degrading to "no deadline" — what happened before — is the right call for a
+*deadline*, where an absent date is merely unhelpful, but it is the wrong call
+for an *event*, where an absent date means the user turns up on the wrong day.
+
+The weekday check is scoped to calendar events for the same reason: a deadline
+saying "before Friday" is allowed to land on Thursday, so checking weekday
+unconditionally would reject correct deadlines. A request naming two weekdays is
+skipped, because there is no single day to check against — refusing an ambiguous
+request would break the conversational routing that keeps ordinary chat out of the
+planner.
+
+**Revisit when.** The model is replaced with one that handles dates reliably, at
+which point this is worth removing rather than keeping as superstition.
+
+**Known gap.** There is no user timezone. Dates are handled in UTC, so an evening
+event can render in a different local day. This is tracked in `MVP_TODO.md` and
+is the most likely source of a remaining "wrong date" report.
 
 ### 2.2 One model in use, not a model per stage
 
@@ -77,10 +123,10 @@ the number of concurrent requests the box can serve.
 
 **Cost.** No cheap model for a hot path. Revisit if a second stage appears.
 
-### 2.3 `think:"low"` rather than disabling thinking
+### 2.3 Think level is a setting, and empty means "do not send it"
 
-**Context.** Ollama accepts a boolean or a graded level in the same `think`
-field. Measured over three planning attempts:
+**Context.** Ollama accepts a boolean or a graded level in the same `think` field.
+With `qwen3:0.6b` the planner hardcoded `think:"low"`, chosen from this table:
 
 | Approach | Valid output | Avg latency | Reasoning tokens |
 | --- | --- | --- | --- |
@@ -88,14 +134,21 @@ field. Measured over three planning attempts:
 | `format` + `think:"low"` | 3/3 | 5.0s | ~216 |
 | Schema described in prose | 3/3 | 9.4s | included above |
 
-**Decision.** Planner requests `think:"low"`.
+**Decision.** `BUDDI_PLANNER_THINK` sets the level. **Empty sends no `think` field
+at all**, which is what `qwen3:4b-instruct-2507-q4_K_M` needs.
 
-**Why.** `think:false` is faster still but **cannot be combined with
-`format`**, so schema-constrained output has to budget for reasoning rather than
-suppressing it. Graded `low` was also not merely cheaper — it produced a better
-title than the default, so quality and latency pointed the same way.
+**Why.** The hardcoded value was correct for the old model and wrong for the new
+one. A non-thinking instruct model has no reasoning to cap, and the runtime
+rejects `think:false` alongside `format` regardless — so the old setting was not
+merely redundant but actively incompatible with the model we moved to.
 
-**Cost.** A small reasoning tax on every planning call.
+`think:false` being unable to combine with `format` still holds and still matters:
+schema-constrained output has to budget for reasoning rather than suppressing it.
+
+**Why a setting rather than logic.** The planner model was already switchable by
+environment variable, so a deployment that changed the model could previously not
+change how it was asked to reason. Two switches for one behaviour is how a
+deployment ends up with a model and a prompt that were never tested together.
 
 ### 2.4 Schema-constrained output, not a schema described in prose
 
@@ -798,3 +851,193 @@ best-effort guess at a mutating external service.
 Argument validation stays in the tool, before the proposal is shown, so a payload
 that would be refused at execution is never displayed for approval. That is the
 existing rule and it extends unchanged to a tool that talks to a third party.
+## 11. The chat surface
+
+The earlier shape of this repository treated the API as the product and the
+interface as a scaffold. That stopped being true the moment the first end-to-end
+run worked, and every decision below follows from taking the interface seriously
+rather than as a demo.
+
+### 11.1 Stream replies instead of buffering them
+
+**Context.** A CPU-only reply takes 10–15 seconds. The buffered call worked.
+
+**Decision.** Completions stream as newline-delimited JSON chunks, over SSE on
+the HTTP surface.
+
+**Why.** A caller that sees nothing until the end cannot show progress and cannot
+stop early, so the wait is dead time from the user's point of view. It is also
+unbearable repeated — every misworded request means another 15 seconds of
+nothing.
+
+Reading is done against the JSON stream rather than by splitting the payload on
+newlines, because a value can contain a newline inside a string and a
+line-oriented reader desynchronises on the first one it meets.
+
+**Cost.** Two code paths can drift. The buffered and streaming requests share one
+encoder so they cannot diverge on validation.
+
+### 11.2 Reasoning is absent, never empty
+
+**Context.** The reasoning token stream was fetched and discarded, leaving a
+character count that the interface could render as "thought for 214 characters".
+
+**Decision.** The reasoning text is carried through to the client and shown
+behind a disclosure — **and the panel is omitted entirely when the model reports
+no reasoning.**
+
+**Why.** An always-present-but-empty panel reads as a bug, which trains the user
+to distrust it. And there was a tempting wrong answer available: synthesising
+plausible-sounding thinking to fill the panel. That would have been presented as
+the model's own reasoning when it was text written by us, on a surface whose
+entire purpose is showing the user what the model actually did.
+
+A non-thinking instruct model has no reasoning to show, so absence is the honest
+representation.
+
+### 11.3 Messages form a tree, and revision preserves the original
+
+**Context.** A run answers one question: a goal in, a plan out. There was nowhere
+to put a corrected request, so a misworded message could only be abandoned and
+retyped — which is exactly the loop that surfaced the wrong-date bug, because
+retrying meant starting over rather than fixing one thing.
+
+**Decision.** Messages carry `parent_id`. Revising a message inserts a
+replacement and marks the original `superseded`.
+
+**Why.** Overwriting would erase the record of what was originally asked, and that
+record is the thing worth being able to look back at — especially when the
+question is "why did it book a dentist appointment on a Thursday".
+
+### 11.4 One transcript, not three ways into the same data
+
+**Context.** The interface had a request box, a run list and a run detail pane.
+All three reached the same runs.
+
+**Decision.** A single transcript, with approvals rendered per message. The
+run-centric views were deleted.
+
+**Why.** Three entry points into one dataset stay consistent until they don't,
+and they didn't: approval cards were keyed to transient state, so they flashed and
+vanished, leaving a plan that nothing could be actioned on. Fixing that meant
+rendering approvals from the message's own `run_id`, which is what a transcript
+naturally gives you and a run list does not.
+
+### 11.5 The transcript offered to the model is budgeted in code
+
+**Decision.** History is trimmed oldest-first against an explicit budget before
+being sent.
+
+**Why.** The transcript grows without limit and the context window does not.
+Left to the runtime it truncates silently, which surfaces as the model
+appearing to forget something the user can plainly see in the conversation.
+
+### 11.6 Routing is decided before any length limit applies
+
+**Decision.** Calendar wording is detected without a length cap; everything else
+goes through a bounded heuristic and becomes conversational.
+
+**Why.** The failure this prevents is asymmetric. Answering a calendar request
+conversationally produces the model telling the user it has saved an event, which
+it has no way to do — an invented completion, on an operation that mutates
+someone's real calendar. The cost of a false negative there is far higher than
+the cost of planning something that could have been a chat reply.
+
+The prompt states plainly that there are no tools and that completion must never
+be claimed, and still offers drafting and summarising, so it is not simply
+refusing everything.
+
+### 11.7 Validation runs before the stream opens
+
+**Context.** An SSE handler commits the response to `200` as soon as it starts
+writing.
+
+**Decision.** The message is validated first. The server write timeout is cleared
+for the chat route only.
+
+**Why.** A rejected request answered inside an already-open stream arrives as a
+status the client cannot act on. And the write timeout is sized for a buffered
+response; left in place it cuts a 15-second reply off part way through, which
+presents as the stream ending with no error.
+
+## 12. Google Calendar end to end
+
+### 12.1 Signed, single-use OAuth state
+
+**Decision.** The redirect carries a signed state value; the callback rejects
+anything unsigned, mismatched, expired or already used.
+
+**Why.** The callback is the one endpoint here that is public and
+unauthenticated — the provider has to be able to reach it without a bearer
+token. That makes it the single place an attacker can aim a crafted request, and
+without state the callback will happily exchange whatever authorization code it
+is handed into a token for the attacker's account.
+
+### 12.2 Tokens encrypted at rest
+
+**Decision.** Stored through a cipher keyed by a value supplied to the process.
+
+**Why.** The refresh token is a long-lived credential, and the database is the
+component most likely to be copied, backed up or leaked. This follows from the
+decision to store the credential at all, so it is not a separate choice to
+revisit.
+
+### 12.3 Times are sent with explicit offsets and a named timezone
+
+**Context.** Google rejected a calendar write outright.
+
+**Decision.** Times carry an explicit offset, `timeZone` is stated, an event with
+a start and no end is closed one hour later, and `endTimeUnspecified` is never
+sent.
+
+**Why.** An unset end is rejected outright. A start with no offset is
+interpreted against a timezone the request never names, so the same payload means
+different instants depending on an assumption made on our behalf.
+
+**Gap.** The timezone is `UTC` because there is no user timezone yet, so an
+evening event can land on the wrong local day. That is the most likely remaining
+cause of a "wrong date" report and it is a real bug, not a display artifact.
+
+### 12.4 Provider errors include the complete raw response
+
+**Decision.** Failures surface Google's raw response body alongside the request
+id.
+
+**Why.** Google's error messages do not name the fields that caused the
+rejection. Without the body, a failed calendar write is not actionable — and
+because the write is user-initiated, an unfixable failure is simply a broken
+feature from the user's side.
+
+### 12.5 Approval is released on transient tool failure
+
+**Context.** A failed approval left the run `failed` with nothing to show, and the
+approval had already been spent — so the retry the error asked for was
+impossible.
+
+**Decision.** A failure that could plausibly succeed on a second attempt returns
+the run and its approval to `awaiting_approval`. A permanent rejection still
+consumes the approval.
+
+**Why.** The approval exists to gate the *decision* to act, not to be a one-shot
+token that a flaky network can burn. Re-offering an approval for a call already
+known to be refused would invite retrying something that cannot succeed, so the
+distinction is on whether the failure is likely to be different next time.
+
+### 12.6 Repository history is reconstructed in slices
+
+**Context.** The work accumulated in a working tree that was not under version
+control.
+
+**Decision.** Commits are grouped by concern and the two large features are
+committed on branches and merged back, so there are restore points rather than
+one snapshot.
+
+**Why.** Not for the history's own sake. The same session produced two corrupted
+files from broad text substitutions, which is the situation version control
+exists to make recoverable, and both were caught by running the build after every
+change — the discipline the commits are meant to make cheap to keep.
+
+**Honest limitation.** Files are split at file granularity, not hunk. A file
+containing more than one change is committed whole at the point the first of them
+needs it, so the history is a faithful grouping of the final states rather than a
+record of the order edits were typed in.
