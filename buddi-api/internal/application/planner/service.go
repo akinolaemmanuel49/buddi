@@ -587,7 +587,7 @@ func (s *Service) PlanIn(
 			break
 		}
 
-		plan, fatal, notes := s.parsePlan(res.Text)
+		plan, fatal, notes := s.parsePlan(res.Text, loc)
 
 		// Checked after parsing and before the plan is accepted, because a date on the
 		// wrong weekday is the kind of mistake that looks entirely well formed: a valid
@@ -744,8 +744,17 @@ func dateContext(now time.Time, loc *time.Location) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf(
-		"The current date and time is %s (%s).\n",
-		local.Format("2006-01-02T15:04:05"), loc))
+		"The current date and time is %s (zone %s).\n",
+		local.Format("2006-01-02T15:04:05-07:00"), loc))
+
+	// The offset is spelled out rather than left implicit. The model was writing
+	// "15:00:00Z" for a 3pm London appointment despite being told the zone, because
+	// "RFC3339" permits either and Z is the shorter answer. Naming the offset it must
+	// use, and saying plainly that Z is wrong, is what gets it read.
+	b.WriteString(fmt.Sprintf(
+		"Write every timestamp with the offset %s. Never end a timestamp with Z: a "+
+			"Z makes it mean a different hour in %s.\n\n",
+		local.Format("-07:00"), loc))
 
 	b.WriteString(fmt.Sprintf("Today is %s (%s). Tomorrow is %s (%s).\n\n",
 		local.Format("2006-01-02"), local.Weekday(),
@@ -1058,6 +1067,40 @@ func isWordByte(b byte) bool {
 		(b >= 'A' && b <= 'Z')
 }
 
+// reanchorDueAt moves a timestamp the model wrote as UTC back into the user's zone.
+//
+// The model was asked to write the user's offset and was told that Z is wrong, and it
+// still answered "15:00:00Z" for a 3pm London appointment. Told twice and it was not
+// enough, so the conversion is done here as well.
+//
+// The reading is that a bare wall clock written with Z means that clock locally. Someone
+// who genuinely means 3pm UTC can say so, and the model then has an offset to preserve;
+// silently rewriting that would be wrong. This only fires when the two differ, so a plan
+// produced in UTC by a UTC user is untouched.
+//
+// It is reported rather than silent, because a plan whose time was moved is worth knowing
+// about even when the move is right.
+func reanchorDueAt(due *time.Time, loc *time.Location) (*time.Time, bool) {
+	if due == nil || loc == nil || loc == time.UTC {
+		return due, false
+	}
+
+	_, offset := due.Zone()
+
+	if offset != 0 {
+		// The model used the user's offset already, or one of their own. An offset that
+		// differs from theirs is not obviously wrong, so it is left alone.
+		return due, false
+	}
+
+	wall := due.In(time.UTC)
+
+	anchored := time.Date(wall.Year(), wall.Month(), wall.Day(),
+		wall.Hour(), wall.Minute(), wall.Second(), wall.Nanosecond(), loc)
+
+	return &anchored, true
+}
+
 // staleDueTolerance is how far into the past a due date may sit and still be
 // kept. A newly created task due yesterday is almost always the model guessing
 // at a relative date rather than a user recording something retrospective, and
@@ -1080,7 +1123,7 @@ const artefactDueWindow = 5 * time.Minute
 // usable content is fatal. A malformed optional field is dropped and noted,
 // because discarding an otherwise good plan over a bad due date wastes a retry
 // and, in a live run, turned a good plan into a fallback on every attempt.
-func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
+func (s *Service) parsePlan(raw string, loc *time.Location) (*Plan, []string, []string) {
 	var (
 		fatal []string
 		notes []string
@@ -1205,7 +1248,20 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 	if due := strings.TrimSpace(candidate.DueAt); due != "" {
 		parsed, err := time.Parse(time.RFC3339, due)
 
-		now := s.now().UTC()
+		now := s.now()
+
+		// Re-anchored before the past and artefact checks, and while the parsed value
+		// still carries the offset the model chose. Converting to UTC first would make
+		// every timestamp look like it was written as UTC.
+		if err == nil {
+			if anchored, moved := reanchorDueAt(&parsed, loc); moved {
+				parsed = *anchored
+
+				notes = append(notes, fmt.Sprintf(
+					"due_at was written as UTC and has been read as %s, which is what "+
+						"that time means locally", parsed.In(loc).Format("15:04 MST")))
+			}
+		}
 
 		switch {
 		case err != nil:
