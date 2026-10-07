@@ -159,7 +159,7 @@ func (r *MessageRepository) ListAll(
 	return r.list(ctx, userID, conversationID, false)
 }
 
-// Update persists content, reasoning and the linked run.
+// Update persists content, reasoning, the linked run and the pending question.
 //
 // The thread shape is not writable: parent_id and superseded_message_id define the
 // branch, and changing them underneath a transcript would reorder history that has
@@ -173,9 +173,10 @@ func (r *MessageRepository) Update(ctx context.Context, message *domain.Message)
 	result := db.Model(&domain.Message{}).
 		Where("user_id = ? AND id = ?", message.UserID, message.ID).
 		Updates(map[string]any{
-			"content":   message.Content,
-			"reasoning": message.Reasoning,
-			"run_id":    message.RunID,
+			"content":               message.Content,
+			"reasoning":             message.Reasoning,
+			"run_id":                message.RunID,
+			"clarification_request": message.ClarificationRequest,
 		})
 	if result.Error != nil {
 		return translate(result.Error)
