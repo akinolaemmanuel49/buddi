@@ -4,16 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/akinolaemmanuel49/buddi-api/internal/application/planner"
 	"github.com/akinolaemmanuel49/buddi-api/internal/domain"
 )
-
-// wednesday is the instant every routing test runs against. A routing rule that reads
-// "friday" must not mean a different thing on a different day, so nothing here is
-// allowed to depend on the real clock.
-var wednesday = time.Date(2026, time.October, 7, 12, 0, 0, 0, time.UTC)
 
 // The report that prompted the table: an errand with no time in it was being written to
 // the user's calendar.

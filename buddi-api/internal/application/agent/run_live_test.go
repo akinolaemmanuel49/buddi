@@ -31,19 +31,14 @@ import (
 // and plan_fallback were both forgotten that way, and every run reported itself
 // ungrounded while its plan was written from the user's own notes. The plan looked
 // right, which is exactly why nothing else caught it.
-//
-//	go test ./internal/application/agent with
-//	BUDDI_TEST_DATABASE_URI=postgres://buddi:buddi@localhost:5432/buddi_test?sslmode=disable
 func TestLiveRunKeepsItsGroundingStateAndFallbackFlag(t *testing.T) {
 	tests := map[string]struct {
 		grounding domain.GroundingState
 		fallback  bool
 	}{
-		"notes reached the planner": {grounding: domain.GroundingGrounded, fallback: false},
-		"retrieval matched nothing": {grounding: domain.GroundingNoContext, fallback: false},
-		"retrieval failed":          {grounding: domain.GroundingUngrounded, fallback: false},
-		// The fallback is the one case that would have been reported as a model
-		// plan, because false is also the column default.
+		"notes reached the planner":   {grounding: domain.GroundingGrounded, fallback: false},
+		"retrieval matched nothing":   {grounding: domain.GroundingNoContext, fallback: false},
+		"retrieval failed":            {grounding: domain.GroundingUngrounded, fallback: false},
 		"the model could not be used": {grounding: domain.GroundingNoContext, fallback: true},
 	}
 

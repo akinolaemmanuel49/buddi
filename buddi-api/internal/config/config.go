@@ -21,13 +21,6 @@ type Config struct {
 	Environment    string
 	LogLevel       string
 	AllowedOrigins []string
-	// WebOrigin is the browser-facing address of the web app, used only to send the
-	// user back after an OAuth round trip.
-	//
-	// It is separate from AllowedOrigins because that one answers "which origins may
-	// call this API", which is empty for a same-origin deployment and says nothing
-	// about where the UI lives. Guessing it from the request would break behind a
-	// proxy, where every request looks like it came from the proxy's own host.
 	WebOrigin      string
 	RequestTimeout time.Duration
 	ShutdownGrace  time.Duration
