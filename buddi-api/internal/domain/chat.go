@@ -151,6 +151,17 @@ type Message struct {
 	// its approval reachable from the transcript.
 	RunID *uuid.UUID
 
+	// ClarificationRequest is set on an assistant message that asked a question
+	// instead of answering, and holds the original request.
+	//
+	// The question is already Content. This holds the request it was asked about,
+	// because the user's reply alone — "Tuesday at 4pm" — names no dentist, and
+	// re-planning from it alone would lose the subject. It is nil on every other
+	// message, and it is what makes a pending question resumable at all: the chat
+	// service is stateless per request, so "is a question still outstanding?" has to
+	// be answerable from the transcript rather than from memory.
+	ClarificationRequest *string
+
 	CreatedAt time.Time
 }
 

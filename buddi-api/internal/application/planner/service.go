@@ -33,6 +33,25 @@ const maxSteps = 10
 // maxStepsLength bounds each step description.
 const maxStepsLength = 500
 
+// maxLocationLength bounds a calendar event's location.
+//
+// Google's own limit is far higher, but a location is somewhere a person is, and
+// this is not prose.
+const maxLocationLength = 200
+
+// maxAttendeeLength bounds one attendee name.
+const maxAttendeeLength = 120
+
+// maxAttendees bounds the attendee list. An event with more people than this is a
+// meeting Buddi has no business reconstructing from one sentence.
+const maxAttendees = 20
+
+// maxQuestionLength bounds a clarification question.
+//
+// The question is shown to the user in place of a plan, so it has to be short
+// enough to read and answer without scrolling.
+const maxQuestionLength = 300
+
 // defaultNumPredict is generous on purpose. A reasoning model spends most of its
 // budget before answering, and too small a cap returns an empty response that
 // looks like a model failure rather than a budgeting mistake: at 512 tokens a live
@@ -117,6 +136,27 @@ type Plan struct {
 	Priority    domain.TaskPriority `json:"priority"`
 	DueAt       *time.Time          `json:"due_at,omitempty"`
 	Steps       []Step              `json:"steps"`
+
+	// Location is where the event happens, for a calendar_event.
+	//
+	// It exists because "dentist at 3pm" and "dentist at 3pm at Reception on
+	// Fifth" are different events, and with nowhere to put the second the detail is
+	// either dropped or crammed into a sentence that then reads as prose.
+	Location string `json:"location,omitempty"`
+
+	// Attendees are the people involved, for a calendar_event. A request naming a
+	// doctor or a friend needs somewhere to put them: without it the name is either
+	// lost or restated in the description, and it cannot be found again in the
+	// calendar's own people view.
+	Attendees []string `json:"attendees,omitempty"`
+
+	// Question is what the planner needs to ask, when Intent is clarification.
+	//
+	// It is a real question aimed at the user rather than a restatement of what was
+	// unclear, so it should name what is missing and be answerable in a sentence:
+	// "Which doctor are you seeing?" rather than "Please clarify the details of your
+	// request".
+	Question string `json:"question,omitempty"`
 }
 
 // Outcome records how a plan was produced, for observability.
@@ -135,6 +175,12 @@ type Outcome struct {
 
 	// Attempts counts generation calls made, including retries.
 	Attempts int
+
+	// Route records what the routing table decided, so a caller can see whether the
+	// intent came from the table or from the model. Without it the two are
+	// indistinguishable in the result, and "the table was right" and "the model was
+	// right" are not the same claim.
+	Route Route `json:"route"`
 
 	// ValidationErrors holds why each rejected attempt was rejected, which is
 	// what makes a persistent failure diagnosable rather than mysterious.
@@ -309,20 +355,27 @@ func buildSchema() json.RawMessage {
 		"properties": map[string]any{
 			"intent": map[string]any{
 				"type": "string",
-				"description": "What the request is for. Use calendar_event whenever the user " +
-					"wants something put on their calendar, or mentions a calendar, meeting, " +
-					"appointment or event to be scheduled, even if it also sounds like something " +
-					"to do. Use task for anything else that needs tracking.",
+				"description": "What the request is for. Use calendar_event only when the user " +
+					"wants something put on their calendar at a time they named: a meeting, " +
+					"appointment, or a booking with a person or a place. Use task for anything " +
+					"else that needs tracking, including errands with no time in them, such as " +
+					"buy groceries. Use clarification when something the user would know is " +
+					"missing and you would have to invent it.",
 				"enum": intents,
 			},
 			"title": map[string]any{
-				"type":        "string",
-				"description": "A short imperative title. One short phrase, never a sentence and never a restatement of the request.",
-				"maxLength":   maxTitleLength,
+				"type": "string",
+				"description": "A short noun phrase naming the item. Never an instruction and never a " +
+					"restatement of the request: \"Dentist Appointment\", not \"Book Dentist " +
+					"Appointment\". Never a sentence.",
+				"maxLength": maxTitleLength,
 			},
 			"description": map[string]any{
-				"type":        "string",
-				"description": "Optional extra detail for the user.",
+				"type": "string",
+				"description": "One short line of useful detail about the item, written for someone " +
+					"reading it later. For an event this is the point of it, not the steps: " +
+					"\"Annual check-up with Dr Ada Okafor\". For a task it is what done looks " +
+					"like. Leave empty when there is genuinely nothing to add.",
 			},
 			"priority": map[string]any{
 				"type": "string",
@@ -335,12 +388,33 @@ func buildSchema() json.RawMessage {
 					"at 3pm\" must set it. Use an empty string only when the request names no " +
 					"date or time at all.",
 			},
-			"steps": map[string]any{
+			"location": map[string]any{
+				"type": "string",
+				"description": "Where a calendar_event happens. Only if the user said so: " +
+					"\"Reception, Fifth Street\". Leave empty rather than guessing a building " +
+					"or a room.",
+			},
+			"attendees": map[string]any{
 				"type":        "array",
-				"description": "The individual actions needed, in order.",
-				"items":       map[string]any{"type": "string", "maxLength": maxStepsLength},
-				"minItems":    1,
-				"maxItems":    maxSteps,
+				"description": "People a calendar_event involves, only if the user named them.",
+				"items":       map[string]any{"type": "string", "maxLength": maxAttendeeLength},
+				"maxItems":    maxAttendees,
+			},
+			"steps": map[string]any{
+				"type": "array",
+				"description": "The actions a person actually takes, in order, for a task. Empty " +
+					"for a calendar_event: an appointment is not a sequence of actions, and a " +
+					"step like \"attend the dentist\" says nothing. Empty for a clarification.",
+				"items":    map[string]any{"type": "string", "maxLength": maxStepsLength},
+				"maxItems": maxSteps,
+			},
+			"question": map[string]any{
+				"type": "string",
+				"description": "The question to put to the user when intent is clarification. It " +
+					"must name what is missing and be answerable in a sentence: \"Which doctor " +
+					"are you seeing?\", not \"Please clarify your request\". Empty for every " +
+					"other intent.",
+				"maxLength": maxQuestionLength,
 			},
 		},
 		// intent is required so a plan cannot reach the registry without one.
@@ -350,7 +424,12 @@ func buildSchema() json.RawMessage {
 		// default for a request nobody can classify, but wrong for one that plainly named a
 		// meeting. Requiring it forces the model to choose deliberately, and the description
 		// carries what each choice means.
-		"required": []string{"intent", "title", "priority", "steps"},
+		//
+		// steps is deliberately NOT required. It was, with minItems 1, which meant a
+		// calendar event had to invent an action to satisfy the schema â€” and the invented
+		// action then became the event's description, because that was the only place it
+		// had anywhere to go.
+		"required": []string{"intent", "title", "priority"},
 	}
 
 	encoded, err := json.Marshal(schema)
@@ -405,7 +484,13 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 
 	chunks := s.ground(ctx, userID, trimmedGoal, outcome)
 
-	prompt := s.basePrompt(trimmedGoal, chunks)
+	// The table decides the intent before the model is asked, so the prompt can state
+	// it rather than hoping the model infers it from an enum.
+	route := RouteRequest(trimmedGoal)
+
+	outcome.Route = route
+
+	prompt := s.basePrompt(trimmedGoal, chunks, route)
 
 	attempts := s.maxRetries + 1
 
@@ -459,6 +544,16 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 				fatal = append(fatal, complaint)
 			}
 		}
+
+		// The table has the last word on the intent. A model that answers a routed
+		// request with a different intent is not proposing something the user asked
+		// for, and the whole point of the table is that this is decided in code.
+		if len(fatal) == 0 && plan != nil {
+			if complaint := checkRoute(route, plan); complaint != "" {
+				fatal = append(fatal, complaint)
+			}
+		}
+
 		outcome.Notes = append(outcome.Notes, notes...)
 
 		if len(fatal) == 0 {
@@ -477,6 +572,24 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 		}
 	}
 
+	// Falling back here means the model never produced a usable plan. For a request the
+	// table says is missing a time, the honest fallback is the question rather than a
+	// task: a task titled "Dentist appointment" with no time is the thing that got us
+	// here, and offering it again would repeat the bug.
+	if route.NeedsClarification {
+		outcome.Plan = &Plan{
+			Intent:      domain.PlanIntentClarification,
+			Title:       capitaliseFirst(truncateOnWordBoundary(trimmedGoal, maxTitleLength)),
+			Priority:    domain.TaskPriorityNormal,
+			Question:    missingTimeQuestion(trimmedGoal),
+			Steps:       nil,
+			Description: "",
+		}
+		outcome.UsedFallback = true
+
+		return outcome, nil
+	}
+
 	outcome.Plan = fallbackPlan(trimmedGoal)
 	outcome.UsedFallback = true
 
@@ -489,21 +602,51 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 // arithmetic: given the current instant and asked to resolve "Friday", it produced a
 // Thursday eight days out. Doing the arithmetic here and leaving it to choose turns an
 // unreliable computation into a lookup.
-func (s *Service) basePrompt(goal string, chunks []ContextChunk) string {
+func (s *Service) basePrompt(goal string, chunks []ContextChunk, route Route) string {
 	return fmt.Sprintf(`You turn a request into a single tracked item of work.
 
 %s
+Routing:
+%s
 Rules:
-- intent: calendar_event when the request wants something put on a calendar or names a meeting, appointment or event. task otherwise.
+- intent: %s
 - title: the subject of the item, as a noun phrase, at most %d characters. Not an instruction: "Dentist Appointment", never "Book Dentist Appointment". Never a sentence.
 - priority: one of the values the schema lists.
 - due_at: an RFC3339 timestamp. It is the deadline for a task, and the start time for a calendar_event.
-- steps: short actions the person would actually take, not instructions restated back to them.
+- description: one useful line about the item. For an event, the point of it: "Annual check-up with Dr Ada Okafor". Never a list of steps and never the request restated.
+- location: only if the user said where. Otherwise leave it empty rather than guessing a building or a room.
+- attendees: only the people the user named. Leave empty otherwise.
+- steps: what a person actually does, in order, for a task. Leave empty for a calendar_event. An appointment is not a sequence of actions, so a step such as "attend the dentist" says nothing.
+- question: only when intent is clarification. Name what is missing and make it answerable in a sentence: "Which doctor are you seeing?"
 %s
 Populate a field only when the request supports it. Never invent a value, and never copy wording from these instructions into a field.
 Never mention a date in the title or the steps. Dates belong only in due_at.
 
-Request: %s`, dateContext(s.now()), maxTitleLength, contextBlock(chunks), goal)
+Request: %s`, dateContext(s.now()), routingBlock(route), route.Intent, maxTitleLength, contextBlock(chunks), goal)
+}
+
+// routingBlock tells the model what the table decided.
+//
+// The model is told the verdict rather than the rules because it will be asked for one
+// intent and a rule set leaves it to re-derive the same conclusion, which is the step
+// it gets wrong. The rules behind the verdict are in routing.go, where they are
+// tested.
+func routingBlock(route Route) string {
+	if route.NeedsClarification {
+		return fmt.Sprintf(
+			"- intent: must be %s. %s, and question must ask when it is. "+
+				"Set no due_at and invent no time: the time is the field this request is missing.",
+			domain.PlanIntentClarification, route.Reason)
+	}
+
+	if route.Confident {
+		return fmt.Sprintf("- intent: must be %s. %s.", route.Intent, route.Reason)
+	}
+
+	return "- intent: this request did not match a known kind of request, so choose the one that fits: " +
+		"calendar_event only when it wants something on a calendar at a time it named, " +
+		"task for anything else needing tracking, clarification only when something the " +
+		"user would know is missing."
 }
 
 // weekdayWindow is how many days ahead the date table covers.
@@ -821,7 +964,10 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 		Description string   `json:"description"`
 		Priority    string   `json:"priority"`
 		DueAt       string   `json:"due_at"`
+		Location    string   `json:"location"`
+		Attendees   []string `json:"attendees"`
 		Steps       []string `json:"steps"`
+		Question    string   `json:"question"`
 	}
 
 	if err := json.Unmarshal([]byte(trimmed), &candidate); err != nil {
@@ -867,6 +1013,42 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 		plan.Description = ""
 	}
 
+	// Location and attendees are event fields. They are carried on the plan rather
+	// than folded into the description because a calendar that has a separate place
+	// and a separate people list can be searched by them, and a sentence cannot be.
+	plan.Location = strings.TrimSpace(candidate.Location)
+	if len(plan.Location) > maxLocationLength {
+		notes = append(notes, fmt.Sprintf("location was %d characters and was dropped", len(plan.Location)))
+		plan.Location = ""
+	}
+
+	for _, attendee := range candidate.Attendees {
+		attendee = strings.TrimSpace(attendee)
+
+		if attendee == "" {
+			continue
+		}
+
+		if len(attendee) > maxAttendeeLength {
+			attendee = truncateOnWordBoundary(attendee, maxAttendeeLength)
+		}
+
+		plan.Attendees = append(plan.Attendees, attendee)
+	}
+
+	if len(plan.Attendees) > maxAttendees {
+		notes = append(notes, fmt.Sprintf("the model returned %d attendees and the last %d were dropped", len(plan.Attendees), len(plan.Attendees)-maxAttendees))
+		plan.Attendees = plan.Attendees[:maxAttendees]
+	}
+
+	// A task has no event to attach a place or people to, so these are dropped rather
+	// than carried as fields that nothing will ever read.
+	if plan.Intent == domain.PlanIntentTask && (plan.Location != "" || len(plan.Attendees) > 0) {
+		notes = append(notes, "location and attendees were dropped: a task is not an event")
+		plan.Location = ""
+		plan.Attendees = nil
+	}
+
 	priority := domain.TaskPriority(strings.ToLower(strings.TrimSpace(candidate.Priority)))
 
 	switch {
@@ -898,6 +1080,26 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 		}
 	}
 
+	if plan.Intent == domain.PlanIntentClarification {
+		// A clarification is a question, so a title is not the point of it â€” but an
+		// empty one usually means the model did not understand the request at all,
+		// which is not something a question can fix. Keep it required.
+		plan.Question = strings.TrimSpace(candidate.Question)
+
+		switch {
+		case plan.Question == "":
+			fatal = append(fatal, "a clarification must carry a question naming what is missing")
+		case len(plan.Question) > maxQuestionLength:
+			fatal = append(fatal, fmt.Sprintf("question must be at most %d characters, got %d", maxQuestionLength, len(plan.Question)))
+		}
+
+		// A clarification proposes nothing, so a deadline on one is noise at best.
+		if plan.DueAt != nil {
+			notes = append(notes, "due_at was dropped: a clarification does not schedule anything")
+			plan.DueAt = nil
+		}
+	}
+
 	for _, step := range candidate.Steps {
 		step = strings.TrimSpace(step)
 
@@ -913,11 +1115,23 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 	}
 
 	switch {
-	case len(plan.Steps) == 0:
-		fatal = append(fatal, "steps must contain at least one action")
 	case len(plan.Steps) > maxSteps:
 		notes = append(notes, fmt.Sprintf("the model returned %d steps and the last %d were dropped", len(plan.Steps), len(plan.Steps)-maxSteps))
 		plan.Steps = plan.Steps[:maxSteps]
+	case len(plan.Steps) == 0 && plan.Intent == domain.PlanIntentTask:
+		// Only a task needs them. This was required of every plan, which meant an
+		// appointment had to invent an action to satisfy the schema â€” and because
+		// steps were the only thing the event description was built from, the
+		// invented action became the text in the user's calendar.
+		fatal = append(fatal, "a task must contain at least one action")
+	}
+
+	// A clarification carries a question, not a plan, so the event fields are
+	// dropped rather than half-populated.
+	if plan.Intent == domain.PlanIntentClarification {
+		plan.Steps = nil
+		plan.Location = ""
+		plan.Attendees = nil
 	}
 
 	if len(fatal) > 0 {
