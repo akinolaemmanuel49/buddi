@@ -27,6 +27,14 @@ type streamTurnRequest struct {
 
 	// Edit makes this turn revise ParentID instead of appending.
 	Edit bool `json:"edit,omitempty"`
+
+	// TimeZone is the IANA zone the user is in, from the browser.
+	//
+	// Optional, and an absent one means UTC rather than a rejection: this arrives from
+	// a client, so refusing the turn over a zone name would stop the user doing
+	// anything at all. Sending it is what makes "Friday at 3pm" land on Friday at 3pm
+	// rather than an hour out.
+	TimeZone string `json:"time_zone,omitempty"`
 }
 
 // messageResponse is one turn as the client renders it.

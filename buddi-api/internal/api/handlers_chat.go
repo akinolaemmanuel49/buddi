@@ -43,6 +43,7 @@ func (a *API) handleStreamTurn(w http.ResponseWriter, r *http.Request) {
 		ConversationID: body.ConversationID,
 		ParentID:       body.ParentID,
 		Edit:           body.Edit,
+		TimeZone:       body.TimeZone,
 	}
 
 	// Validated before the stream opens, because opening it commits the response to
