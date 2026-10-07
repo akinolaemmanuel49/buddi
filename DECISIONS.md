@@ -1294,3 +1294,75 @@ Google renders both.
 **Why the derived value is reported.** It appears in the plan notes. A plan that was
 partly derived and one the model produced entirely look identical otherwise, and the
 difference is worth being able to see.
+## 15. Removing what is not used
+
+### 15.1 Dead means unreferenced, and that has to be measured
+
+**Context.** The repository accumulated leftovers: a two-occurrence date table replaced a
+seven-day one and left its window constant behind, and a convenience constructor
+survived the refactor that made its caller pass options directly.
+
+**Decision.** Dead code is identified by reference counting, not by reading.
+
+**Why.** Reading produces confident, wrong answers in both directions. It misses a
+constant that "looks used", and it cuts something reachable only through an interface.
+A count is dull but it is checkable, and it is the only thing that settles whether a
+symbol is live.
+
+**The scoping matters more than the counting.** Two mistakes produce opposite errors:
+
+- Counting within a package flags every constructor called only from cmd/server.
+  Reading the result suggests a large amount of dead code that is very much alive.
+- Counting methods by name flags every interface method and every fake implementing one.
+  Nothing implements an interface *by name* in Go.
+
+So unexported symbols are counted inside their own package, because nothing outside can
+reach them, and exported symbols across the module. Test entry points are excluded
+because the runner calls them by name rather than by source reference.
+
+### 15.2 A name mentioned only in its own comment is dead
+
+**Context.** weekdayWindow and weekdayNames each appeared exactly twice: their
+declaration, and a comment above that declaration describing them.
+
+**Why this needed saying.** A naive reference count reports them as referenced. A
+document that describes a symbol's purpose is not a use of it, and treating it as one
+hides the exact leftovers this exercise is looking for. The count has to exclude
+comments, or at least be inspected against them.
+
+### 15.3 Interface methods and fakes are not dead code
+
+**Decision.** Nothing implementing a port is removed for appearing unreferenced.
+
+**Why.** ListAll, CreateEvent, ReplaceTags and the rest are referenced only by
+interface satisfaction. Deleting a fake's method because the fake is only used in one
+test breaks the compile in a way that reads like a bug rather than a cleanup, and
+deleting the interface method itself would delete behaviour.
+
+### 15.4 Comments are cut for being wrong, not for being long
+
+**Decision.** Comments recording *why* stay. Comments restating what the line does go.
+
+**Why.** The reasoning comments are the most valuable thing in the repository, and the
+reason this project's model limitations were all eventually understood is that each one
+was written down when it was discovered. Cutting them to make a file shorter would
+trade the thing that makes the code maintainable for a cosmetic gain.
+
+What was cut is narrower: a comment that described behaviour which no longer exists, a
+doc comment whose first word did not match the identifier it documented, and duplicated
+explanations of the same decision in two places.
+
+### 15.5 Two whole-word matchers existed
+
+**Context.** planner had containsWeekday from the weekday work, and gained
+containsWord from the routing table written afterwards. Two implementations of the
+same predicate, using the same boundary rule.
+
+**Decision.** One, with the routing table's.
+
+**Why it survived.** Neither was unused, so reference counting said both were live —
+correctly. Duplication is invisible to a dead-code sweep by construction, because the
+whole point of duplication is that everything is referenced.
+
+This is the honest limit of the method: it finds what nothing uses, never what two
+things both use.

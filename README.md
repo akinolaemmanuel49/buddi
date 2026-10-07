@@ -88,6 +88,33 @@ The initial stack is:
 
 The project intentionally avoids adopting a large AI framework initially. The goal is to understand the underlying concepts before introducing additional abstractions.
 
+## Repository layout
+
+The dependency direction is strictly inward: `api` → `application` → `domain`, with
+`infrastructure` implementing ports the application declares. `domain` imports nothing
+from the other three.
+
+| Path | Holds |
+| --- | --- |
+| `cmd/server` | composition root; the only place all of this is wired together |
+| `internal/domain` | types and rules. No behaviour that needs a database, a model or a network |
+| `internal/application` | the use cases: planner, chat, agent, notes, tasks, retrieval, oauth |
+| `internal/api` | HTTP: routing, decoding, mapping, SSE, error mapping |
+| `internal/infrastructure` | the outside world: Postgres, Ollama, Google, MCP |
+| `internal/server` | process concerns: timeouts, graceful shutdown |
+| `internal/observability` | tracing, which is off unless configured |
+| `buddi-web` | React chat interface |
+
+Four things in `application` are worth finding first, because most behaviour decisions
+live in them:
+
+| Package | Decides |
+| --- | --- |
+| `application/planner` | what a request is for, when it needs asking about, and what date it means |
+| `application/chat` | conversation shape, routing, streaming, clarification |
+| `application/agent` | which tool carries an intent, and approval |
+| `application/calendar` | the calendar connector's own contract |
+
 ## Running locally
 
 Postgres, the model runtime and the observability stack all run in Docker, so
@@ -645,6 +672,39 @@ Fine-tuning is **not part of the initial MVP**.
 It may be explored later to determine whether a customized model improves Buddi-specific behavior such as structured outputs, planning, or tool selection.
 
 Personal information should generally remain external to the model and be supplied through retrieval.
+
+## Tests
+
+```bash
+cd buddi-api
+go test ./...          # unit and integration, no external services needed
+gofmt -l . && go vet ./...
+```
+
+Everything in the default run is hermetic. The database tests need the compose `db`
+service, and the tests that drive a **real model** or a **real database** are gated
+behind environment variables so they are skipped rather than failed on a machine that
+has not been set up:
+
+```bash
+go test ./...                                             # default: no external services
+BUDDI_SMOKE_OLLAMA=1 go test ./internal/application/planner/ -run TestLive -v
+BUDDI_TEST_DATABASE_URI="postgres://buddi:buddi@localhost:5432/buddi_test?sslmode=disable" \
+  go test ./internal/application/agent/ -run TestLive -v
+```
+
+| Gate | Enables |
+| --- | --- |
+| `BUDDI_SMOKE_OLLAMA=1` | model output: dates, zones, routing, event detail |
+| `BUDDI_SMOKE_PLANNER=1` | planner schema and latency against the live runtime |
+| `BUDDI_TEST_DATABASE_URI` | run and note-worker integration against a real Postgres |
+
+These are not redundant with the unit tests. A fake generator proves the validator
+*accepts* a correct plan and rejects a wrong one; it cannot prove the model *produces*
+one. Every bug in this project that the unit tests could not see was found by a live
+run — a Thursday eight days out for a Friday, a 3pm appointment arriving as `15:00Z`,
+and a doctor's name copied out of a worked example in the prompt. `DECISIONS.md` records
+each one.
 
 ## MVP Definition of Done
 
