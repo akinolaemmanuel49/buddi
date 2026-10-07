@@ -123,7 +123,8 @@ func calendarRationale(plan *planner.Plan) string {
 	// The time and place are already shown by the approval payload itself, so they are
 	// not repeated here. This is only the fallback for a plan that carried neither.
 	if plan.Location != "" {
-		builder.WriteString(" at " + plan.Location)
+		builder.WriteString(" at ")
+		builder.WriteString(plan.Location)
 	}
 
 	return builder.String()

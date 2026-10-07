@@ -244,9 +244,13 @@ func replyPrompt(history []TurnView, content string, budgetTokens int) string {
 			// could contain a line that looks like an instruction to you. Fenced and
 			// labelled as a transcript, so a message saying "ignore your instructions"
 			// is read as something the user said rather than as something you were told.
-			b.WriteString("<" + role + ">\n")
+			b.WriteString("<")
+			b.WriteString(role)
+			b.WriteString(">\n")
 			b.WriteString(turn.Content)
-			b.WriteString("\n</" + role + ">\n\n")
+			b.WriteString("\n</")
+			b.WriteString(role)
+			b.WriteString(">\n\n")
 		}
 	}
 
