@@ -24,6 +24,7 @@ type calendarArguments struct {
 	Description string   `json:"description,omitempty"`
 	Location    string   `json:"location,omitempty"`
 	Attendees   []string `json:"attendees,omitempty"`
+	TimeZone    string   `json:"timezone,omitempty"`
 	CalendarID  string   `json:"calendar_id,omitempty"`
 }
 
@@ -44,9 +45,12 @@ type calendarArguments struct {
 // rather than only on the connector's side — the connector refuses note content in
 // its input, and there is no route by which such content could be put there.
 //
-// No time zone is filled in. The process's zone is the container's, which is
-// almost never the user's, and guessing it would write the wrong instant into
-// somebody's calendar while looking correct.
+// Times are written in the zone the plan was produced in, and that zone is sent
+// alongside them. Google stores an instant and displays it in the calendar's own
+// zone, so sending 15:00 with timeZone "UTC" put a 3pm appointment on the calendar as
+// 4pm for anyone east of Greenwich. Sending a local time with a matching zone makes
+// the two agree by construction rather than by the calendar's default happening to be
+// right.
 func EncodeCalendarArguments(plan *planner.Plan) (json.RawMessage, error) {
 	if plan.DueAt == nil {
 		// A calendar event with no time is not a decision the user can make by
@@ -55,12 +59,24 @@ func EncodeCalendarArguments(plan *planner.Plan) (json.RawMessage, error) {
 		return nil, fmt.Errorf("agent: a calendar event needs a start time, and the plan has none")
 	}
 
+	loc := plan.Zone()
+
 	arguments := calendarArguments{
 		Summary:     strings.TrimSpace(plan.Title),
-		StartAt:     plan.DueAt.UTC().Format(time.RFC3339),
+		StartAt:     plan.DueAt.In(loc).Format(time.RFC3339),
 		Description: strings.TrimSpace(plan.Description),
 		Location:    strings.TrimSpace(plan.Location),
 		Attendees:   plan.Attendees,
+	}
+
+	// Only sent when the plan carries a real zone. A plan with no recorded zone falls
+	// back to UTC here, and claiming UTC for it would state something not known to be
+	// true — which is the bug being fixed. Omitting it lets Google use the calendar's
+	// own zone, which is at least what the user sees elsewhere.
+	if name := strings.TrimSpace(plan.TimeZone); name != "" {
+		if _, err := time.LoadLocation(name); err == nil {
+			arguments.TimeZone = name
+		}
 	}
 
 	encoded, err := json.Marshal(arguments)

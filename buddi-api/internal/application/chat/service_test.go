@@ -208,16 +208,20 @@ func (f *fakeMessages) Delete(_ context.Context, userID, conversationID uuid.UUI
 	return nil
 }
 
-// fakePlanner answers with a fixed outcome and records the goals it saw.
+// fakePlanner answers with a fixed outcome and records the goals and zones it saw.
 type fakePlanner struct {
 	outcome *planner.Outcome
 	err     error
 
 	goals []string
+	zones []string
 }
 
-func (f *fakePlanner) Plan(_ context.Context, _ uuid.UUID, goal string) (*planner.Outcome, error) {
+func (f *fakePlanner) PlanIn(
+	_ context.Context, _ uuid.UUID, goal string, loc *time.Location,
+) (*planner.Outcome, error) {
 	f.goals = append(f.goals, goal)
+	f.zones = append(f.zones, loc.String())
 
 	return f.outcome, f.err
 }

@@ -428,6 +428,26 @@ export const api = {
 };
 
 /**
+ * The browser's own IANA time zone, or undefined when it cannot be determined.
+ *
+ * Sent with every turn because "Friday at 3pm" means Friday and three in the afternoon
+ * where the user is standing. Without it the server works in UTC, which names the wrong
+ * day near midnight and writes an instant the calendar then displays an hour out — a 3pm
+ * appointment appearing as 4pm for anyone east of Greenwich.
+ *
+ * Undefined rather than a guess when unavailable: the server treats an absent zone as
+ * UTC, and inventing "Europe/London" would be a worse failure than the honest default.
+ */
+export function browserTimeZone(): string | undefined {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * streamTurn posts a message and yields each server-sent event as it arrives.
  *
  * It is a fetch stream rather than EventSource because EventSource cannot send an
@@ -453,12 +473,14 @@ export async function streamTurn(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
+  const payload = { ...body, time_zone: browserTimeZone() };
+
   // A 401 here is retried through the shared refresh, because a stream that fails
   // on an expired token would otherwise log the user out mid-sentence.
   let response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
     signal,
   });
 
@@ -469,7 +491,7 @@ export async function streamTurn(
       response = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
         signal,
       });
     }

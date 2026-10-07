@@ -367,8 +367,54 @@ func TestPromptIncludesTheCurrentDate(t *testing.T) {
 		t.Fatalf("Plan: %v", err)
 	}
 
-	if !strings.Contains(generator.prompts[0], "2026-10-04T09:30:00Z") {
-		t.Errorf("prompt does not carry the current date:\n%s", generator.prompts[0])
+	// The time is stated in the user's zone with the zone named, rather than as a UTC
+	// instant. A bare instant is ambiguous — 09:30Z is 10:30 in London in October — and
+	// the prompt is where the model decides what "9:30" meant.
+	if !strings.Contains(generator.prompts[0], "2026-10-04T09:30:00") {
+		t.Errorf("prompt does not carry the current local time:\n%s", generator.prompts[0])
+	}
+
+	if !strings.Contains(generator.prompts[0], "UTC") {
+		t.Errorf("prompt does not name the zone the time is in:\n%s", generator.prompts[0])
+	}
+}
+
+// The date table has to name the zone too, because a Friday in UTC near midnight is a
+// Thursday for the user.
+func TestPromptNamesTheUserTimeZone(t *testing.T) {
+	now := time.Date(2026, time.October, 4, 9, 30, 0, 0, time.UTC)
+
+	generator := &fakeGenerator{responses: []planner.Response{
+		ok(`{"title":"Dentist","priority":"normal","steps":[]}`),
+	}}
+
+	service, err := planner.NewService(generator, planner.Options{
+		Model: "m",
+		Clock: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	loc, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+
+	if _, err := service.PlanIn(context.Background(), testUserID, "dentist on Friday", loc); err != nil {
+		t.Fatalf("PlanIn: %v", err)
+	}
+
+	prompt := generator.prompts[0]
+
+	if !strings.Contains(prompt, "Europe/London") {
+		t.Errorf("prompt does not name the user's zone:\n%s", prompt)
+	}
+
+	// 09:30 UTC is 10:30 in London while BST is in effect, so the table has to show the
+	// local time rather than the UTC one or the model reads the wrong hour.
+	if !strings.Contains(prompt, "10:30") {
+		t.Errorf("prompt does not show the current time in the user's zone:\n%s", prompt)
 	}
 }
 

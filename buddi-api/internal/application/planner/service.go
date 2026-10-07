@@ -157,6 +157,35 @@ type Plan struct {
 	// "Which doctor are you seeing?" rather than "Please clarify the details of your
 	// request".
 	Question string `json:"question,omitempty"`
+
+	// TimeZone is the IANA zone the dates in this plan are expressed in.
+	//
+	// It is recorded rather than assumed because it changes what the numbers mean: a
+	// plan timestamp is an instant, so without the zone that produced it there is no
+	// way to tell whether 15:00 was meant as three in the afternoon in London or as
+	// three in the afternoon somewhere else. It is also what lets the calendar write a
+	// local time with a matching zone, which is what stops Google rendering a 3pm
+	// appointment as 4pm for anyone east of Greenwich.
+	TimeZone string `json:"time_zone,omitempty"`
+}
+
+// Zone returns the zone the plan's dates are expressed in, or UTC.
+//
+// A plan carries its zone as a name rather than a *time.Location because the plan is
+// serialised onto the run row, and a location pointer does not survive that. An unknown
+// or absent zone falls back to UTC, which is the same behaviour as before this existed
+// and is wrong by at most an hour rather than by an arbitrary amount.
+func (p *Plan) Zone() *time.Location {
+	if p == nil || strings.TrimSpace(p.TimeZone) == "" {
+		return time.UTC
+	}
+
+	loc, err := time.LoadLocation(p.TimeZone)
+	if err != nil {
+		return time.UTC
+	}
+
+	return loc
 }
 
 // Outcome records how a plan was produced, for observability.
@@ -426,7 +455,7 @@ func buildSchema() json.RawMessage {
 		// carries what each choice means.
 		//
 		// steps is deliberately NOT required. It was, with minItems 1, which meant a
-		// calendar event had to invent an action to satisfy the schema â€” and the invented
+		// calendar event had to invent an action to satisfy the schema — and the invented
 		// action then became the event's description, because that was the only place it
 		// had anywhere to go.
 		"required": []string{"intent", "title", "priority"},
@@ -474,6 +503,30 @@ type Retriever interface {
 // an optional one because there is no safe default: grounding a plan without an
 // owner would search whichever notes happened to be nearest to the request text.
 func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Outcome, error) {
+	return s.PlanIn(ctx, userID, goal, time.UTC)
+}
+
+// PlanIn plans a goal in the user's own time zone.
+//
+// The zone is an argument rather than configuration because it is a property of the
+// person, not of the deployment. "Friday at 3pm" means Friday and three in the afternoon
+// where the user is standing; rendering that in UTC both names the wrong day near
+// midnight and writes an instant that the calendar then displays an hour out. In
+// October that is not a rounding detail — it is the difference between 3pm and 4pm in
+// the user's own calendar.
+//
+// The zone is recorded on the plan so the calendar write can send a local time with a
+// matching zone, rather than an instant with an assumed one.
+func (s *Service) PlanIn(
+	ctx context.Context,
+	userID uuid.UUID,
+	goal string,
+	loc *time.Location,
+) (*Outcome, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+
 	trimmedGoal := strings.TrimSpace(goal)
 
 	if trimmedGoal == "" {
@@ -490,7 +543,7 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 
 	outcome.Route = route
 
-	prompt := s.basePrompt(trimmedGoal, chunks, route)
+	prompt := s.basePrompt(trimmedGoal, chunks, route, loc)
 
 	attempts := s.maxRetries + 1
 
@@ -540,7 +593,7 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 		// wrong weekday is the kind of mistake that looks entirely well formed: a valid
 		// timestamp, a plausible plan, and the wrong day in the user's calendar.
 		if len(fatal) == 0 && plan != nil {
-			if complaint := s.checkWeekday(trimmedGoal, plan); complaint != "" {
+			if complaint := s.checkWeekday(trimmedGoal, loc, plan); complaint != "" {
 				fatal = append(fatal, complaint)
 			}
 		}
@@ -559,6 +612,11 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 		if len(fatal) == 0 {
 			outcome.Plan = plan
 
+			// Stamped on every plan, including a fallback, so downstream never has to ask
+			// which zone a timestamp was produced in. A bare instant is ambiguous by
+			// construction: the same number is 3pm in London and 11am in New York.
+			outcome.Plan.TimeZone = loc.String()
+
 			return outcome, nil
 		}
 
@@ -568,7 +626,7 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 		outcome.ValidationErrors = append(outcome.ValidationErrors, fatal...)
 
 		if attempt < attempts-1 {
-			prompt = s.retryPrompt(trimmedGoal, chunks, fatal)
+			prompt = s.retryPrompt(trimmedGoal, chunks, fatal, loc)
 		}
 	}
 
@@ -584,6 +642,7 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 			Question:    missingTimeQuestion(trimmedGoal),
 			Steps:       nil,
 			Description: "",
+			TimeZone:    loc.String(),
 		}
 		outcome.UsedFallback = true
 
@@ -602,7 +661,7 @@ func (s *Service) Plan(ctx context.Context, userID uuid.UUID, goal string) (*Out
 // arithmetic: given the current instant and asked to resolve "Friday", it produced a
 // Thursday eight days out. Doing the arithmetic here and leaving it to choose turns an
 // unreliable computation into a lookup.
-func (s *Service) basePrompt(goal string, chunks []ContextChunk, route Route) string {
+func (s *Service) basePrompt(goal string, chunks []ContextChunk, route Route, loc *time.Location) string {
 	return fmt.Sprintf(`You turn a request into a single tracked item of work.
 
 %s
@@ -622,7 +681,7 @@ Rules:
 Populate a field only when the request supports it. Never invent a value, and never copy wording from these instructions into a field.
 Never mention a date in the title or the steps. Dates belong only in due_at.
 
-Request: %s`, dateContext(s.now()), routingBlock(route), route.Intent, maxTitleLength, contextBlock(chunks), goal)
+Request: %s`, dateContext(s.now(), loc), routingBlock(route), route.Intent, maxTitleLength, contextBlock(chunks), goal)
 }
 
 // routingBlock tells the model what the table decided.
@@ -663,34 +722,107 @@ const weekdayWindow = 7
 // eight days out. So the arithmetic is done here instead, and the model is left to
 // choose from a table rather than to compute one. Choosing from options is a far easier
 // task, and the table cannot be miscalculated.
-func dateContext(now time.Time) string {
-	local := now.UTC()
+// dateContext renders the dates a small model cannot reliably work out for itself.
+//
+// The model is given the current instant and asked to resolve "Friday" against it, and
+// it cannot: asked on a Wednesday for a Friday appointment it answered with a Thursday
+// eight days out. So the arithmetic is done here instead, and the model is left to
+// choose from a table rather than to compute one.
+//
+// Each weekday is listed with its next *two* occurrences, because "Friday" and "next
+// Friday" are different dates and a table holding only the first one cannot express the
+// second. That omission was not neutral: with a one-week table, Oct 16 was unavailable
+// and checkWeekday rejected any plan using it in favour of Oct 9, so a correct "next
+// week" was actively rewritten into the wrong one.
+//
+// loc is the user's own zone. Every date, weekday and current-time shown here is
+// rendered in it, because "Friday" means Friday where the user is, and a table built in
+// UTC near midnight names the wrong day.
+func dateContext(now time.Time, loc *time.Location) string {
+	local := now.In(loc)
 
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("The current date and time is %s.\n",
-		local.Format("2006-01-02T15:04:05Z")))
+	b.WriteString(fmt.Sprintf(
+		"The current date and time is %s (%s).\n",
+		local.Format("2006-01-02T15:04:05"), loc))
 
-	// Weekday first, because that is the word a request uses. The date is there so a
-	// model copying one into due_at cannot mis-transcribe it.
-	b.WriteString("Dates for the coming week:\n")
+	b.WriteString(fmt.Sprintf("Today is %s (%s). Tomorrow is %s (%s).\n\n",
+		local.Format("2006-01-02"), local.Weekday(),
+		local.AddDate(0, 0, 1).Format("2006-01-02"), local.AddDate(0, 0, 1).Weekday()))
 
-	for offset := 1; offset <= weekdayWindow; offset++ {
-		day := local.AddDate(0, 0, offset)
+	b.WriteString("Each day below lists its next two occurrences: the first is what a plain " +
+		"reference to that day means, the second is what \"next <day>\" and \"next week\" mean.\n")
 
-		// "today" and "tomorrow" are the words people reach for instead of a weekday,
-		// and they are the two a model is most likely to get wrong.
-		label := day.Weekday().String()
-		if offset == 1 && day.Weekday() == local.Weekday() {
-			label = "tomorrow"
-		}
+	// Monday first, because that is how a week is read.
+	for offset := int(time.Monday - time.Sunday); offset < 7; offset++ {
+		day := time.Weekday(offset)
 
-		b.WriteString(fmt.Sprintf("  %-10s %s\n", label+":", day.Format("2006-01-02")))
+		first := nextOccurrence(local, day)
+		second := nextOccurrence(local, day).AddDate(0, 0, 7)
+
+		b.WriteString(fmt.Sprintf("  %-10s %s, %s\n",
+			day.String()+":", first.Format("2006-01-02"), second.Format("2006-01-02")))
 	}
 
-	b.WriteString("\nPick the date from this table. Do not do the arithmetic yourself, and do not use a weekday outside it.\n")
+	b.WriteString("\nUse only a date printed above. Do not do the arithmetic yourself.\n")
 
 	return b.String()
+}
+
+// nextOccurrence returns the next date on or after today falling on day.
+//
+// "On or after" rather than strictly after, so a request naming today's weekday resolves
+// to today rather than a week out. The date at which it is called decides that: asking on
+// a Friday for "Friday" means today, which is the reading a person would expect.
+func nextOccurrence(now time.Time, day time.Weekday) time.Time {
+	candidate := now
+	for i := 0; i < 7; i++ {
+		if candidate.Weekday() == day {
+			return time.Date(candidate.Year(), candidate.Month(), candidate.Day(),
+				0, 0, 0, 0, now.Location())
+		}
+
+		candidate = candidate.AddDate(0, 0, 1)
+	}
+
+	return now.AddDate(0, 0, 7)
+}
+
+// nextWeekReference reports whether a request means the *second* occurrence of a
+// weekday rather than the first.
+//
+// "next Friday" is unambiguous. "Friday" is not, which is why this errs towards the
+// nearer date: a request naming a bare weekday means the soonest one, and only an
+// explicit "next" pushes it a week out. Getting this backwards moves an appointment a
+// whole week away, which is a far worse error than being one day out.
+func nextWeekReference(goal string) bool {
+	lower := strings.ToLower(goal)
+
+	// "the week after next" is beyond the table, so it is deliberately not handled here
+	// rather than being silently treated as one week.
+	for _, phrase := range []string{"after next", "week after", "two weeks", "fortnight"} {
+		if strings.Contains(lower, phrase) {
+			return false
+		}
+	}
+
+	return strings.Contains(lower, "next ") || strings.Contains(lower, "following")
+}
+
+// resolveWeekday returns the date a weekday reference in goal means.
+//
+// It exists so the check can name one exact date rather than a day name. The complaint
+// goes back into the retry prompt, and "the request asked for Friday" is not actionable
+// when two Fridays are in play.
+func resolveWeekday(now time.Time, loc *time.Location, goal string, day time.Weekday) time.Time {
+	target := nextOccurrence(now, day)
+
+	if nextWeekReference(goal) {
+		target = target.AddDate(0, 0, 7)
+	}
+
+	return target
 }
 
 // retryPrompt re-asks with the specific complaints, which is far more effective
@@ -702,7 +834,7 @@ func dateContext(now time.Time) string {
 // The retrieved context is repeated too. A retry that dropped it would ask the
 // model to fix a plan it can no longer see the evidence for, which is how a
 // grounded answer turns into an invented one on the second attempt.
-func (s *Service) retryPrompt(goal string, chunks []ContextChunk, problems []string) string {
+func (s *Service) retryPrompt(goal string, chunks []ContextChunk, problems []string, loc *time.Location) string {
 	return fmt.Sprintf(`Your previous answer was rejected:
 %s
 
@@ -714,7 +846,7 @@ Never mention a date in the title or the steps.
 
 Request: %s`,
 		strings.Join(problems, "\n- "),
-		dateContext(s.now()),
+		dateContext(s.now(), loc),
 		contextBlock(chunks),
 		goal)
 }
@@ -836,7 +968,11 @@ var deadlineQualifiers = []string{"before", "by ", "until", "ahead of", "deadlin
 //
 // It does not apply to tasks, where due_at is a deadline, nor to a request naming two
 // weekdays, where there is no single day to check against.
-func (s *Service) checkWeekday(goal string, plan *Plan) string {
+//
+// The comparison is made in the user's own zone. In UTC a Thursday-evening appointment
+// belongs to Friday for anyone east of Greenwich, and checking it in UTC rejects the
+// right date and accepts the wrong one.
+func (s *Service) checkWeekday(goal string, loc *time.Location, plan *Plan) string {
 	if plan == nil || plan.Intent != domain.PlanIntentCalendarEvent || plan.DueAt == nil {
 		return ""
 	}
@@ -861,15 +997,32 @@ func (s *Service) checkWeekday(goal string, plan *Plan) string {
 		}
 	}
 
-	if names != 1 || plan.DueAt.UTC().Weekday() == found {
+	if names != 1 {
+		return ""
+	}
+
+	local := s.now().In(loc)
+
+	// The day the plan falls on, in the user's zone.
+	planned := plan.DueAt.In(loc)
+
+	if planned.YearDay() == local.YearDay() && planned.Year() == local.Year() {
+		// Already today in the user's zone.
+		return ""
+	}
+
+	expected := resolveWeekday(local, loc, goal, found)
+
+	if planned.Year() == expected.Year() && planned.Month() == expected.Month() &&
+		planned.Day() == expected.Day() {
 		return ""
 	}
 
 	return fmt.Sprintf(
-		"due_at is on %s but the request asked for %s: use %s from the date table",
-		plan.DueAt.UTC().Weekday().String(),
-		found.String(),
-		nextWeekday(s.now(), found),
+		"due_at is on %s but the request asked for %s %s: use %s",
+		planned.Format("2006-01-02 (Monday)"),
+		expected.Format("2006-01-02"), found.String(),
+		expected.Format("2006-01-02"),
 	)
 }
 
@@ -903,19 +1056,6 @@ func isWordByte(b byte) bool {
 		(b >= '0' && b <= '9') ||
 		(b >= 'a' && b <= 'z') ||
 		(b >= 'A' && b <= 'Z')
-}
-
-// nextWeekday returns the next occurrence of day, which is what a request naming a
-// weekday means unless it says otherwise.
-func nextWeekday(now time.Time, day time.Weekday) string {
-	for offset := 1; offset <= 7; offset++ {
-		candidate := now.UTC().AddDate(0, 0, offset)
-		if candidate.Weekday() == day {
-			return candidate.Format("2006-01-02")
-		}
-	}
-
-	return "the next " + day.String()
 }
 
 // staleDueTolerance is how far into the past a due date may sit and still be
@@ -1081,7 +1221,7 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 	}
 
 	if plan.Intent == domain.PlanIntentClarification {
-		// A clarification is a question, so a title is not the point of it â€” but an
+		// A clarification is a question, so a title is not the point of it — but an
 		// empty one usually means the model did not understand the request at all,
 		// which is not something a question can fix. Keep it required.
 		plan.Question = strings.TrimSpace(candidate.Question)
@@ -1120,7 +1260,7 @@ func (s *Service) parsePlan(raw string) (*Plan, []string, []string) {
 		plan.Steps = plan.Steps[:maxSteps]
 	case len(plan.Steps) == 0 && plan.Intent == domain.PlanIntentTask:
 		// Only a task needs them. This was required of every plan, which meant an
-		// appointment had to invent an action to satisfy the schema â€” and because
+		// appointment had to invent an action to satisfy the schema — and because
 		// steps were the only thing the event description was built from, the
 		// invented action became the text in the user's calendar.
 		fatal = append(fatal, "a task must contain at least one action")

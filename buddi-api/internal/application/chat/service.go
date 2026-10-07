@@ -203,6 +203,34 @@ type Turn struct {
 
 	// Edit makes this turn revise ParentID instead of appending.
 	Edit bool
+
+	// TimeZone is the IANA zone the user is in, or empty for UTC.
+	//
+	// It is taken from the client rather than configured, because it is a property of
+	// the person using the browser and not of the deployment. Getting it wrong is
+	// visible immediately: a 3pm appointment is written to the calendar as 4pm for
+	// anyone east of Greenwich, and the plan's weekday check rejects the right date
+	// while accepting the wrong one.
+	TimeZone string
+}
+
+// zone resolves the turn's time zone, falling back to UTC.
+//
+// An unknown zone name is not an error. It comes from a browser, so the failure mode is
+// a renamed zone in some future tzdata release, and refusing the turn would stop the
+// user doing anything at all. Falling back to UTC degrades to the old behaviour, which
+// is wrong by an hour rather than unusable.
+func (t Turn) zone() *time.Location {
+	if strings.TrimSpace(t.TimeZone) == "" {
+		return time.UTC
+	}
+
+	loc, err := time.LoadLocation(strings.TrimSpace(t.TimeZone))
+	if err != nil {
+		return time.UTC
+	}
+
+	return loc
 }
 
 // Streamer produces free-form text for a conversational turn.
@@ -232,7 +260,7 @@ type StreamResult struct {
 
 // Planner produces a validated plan for a goal.
 type Planner interface {
-	Plan(ctx context.Context, userID uuid.UUID, goal string) (*planner.Outcome, error)
+	PlanIn(ctx context.Context, userID uuid.UUID, goal string, loc *time.Location) (*planner.Outcome, error)
 }
 
 // RunRecorder turns an already-produced plan into a run awaiting approval.
@@ -420,7 +448,7 @@ func (s *Service) Turn(ctx context.Context, userID uuid.UUID, turn Turn, emit Em
 	}
 
 	if mode == ModePlan {
-		return s.planTurn(ctx, userID, conversation, question, answer, content, emit)
+		return s.planTurn(ctx, userID, conversation, question, answer, content, turn.zone(), emit)
 	}
 
 	return s.replyTurn(ctx, userID, conversation, question, answer, content, emit)
@@ -538,6 +566,7 @@ func (s *Service) planTurn(
 	conversation *domain.Conversation,
 	question, answer *domain.Message,
 	content string,
+	loc *time.Location,
 	emit Emitter,
 ) (*Result, error) {
 	// A reply to a pending question is planned against the request the question was
@@ -547,7 +576,7 @@ func (s *Service) planTurn(
 		return nil, err
 	}
 
-	outcome, err := s.plan(ctx, userID, request, answer, emit)
+	outcome, err := s.plan(ctx, userID, request, answer, loc, emit)
 	if err != nil {
 		return nil, err
 	}
@@ -721,11 +750,12 @@ func (s *Service) plan(
 	userID uuid.UUID,
 	content string,
 	answer *domain.Message,
+	loc *time.Location,
 	emit Emitter,
 ) (*planner.Outcome, error) {
 	service, ok := s.planner.(*planner.Service)
 	if !ok {
-		return s.planner.Plan(ctx, userID, content)
+		return s.planner.PlanIn(ctx, userID, content, loc)
 	}
 
 	service.WithEmitter(func(delta planner.Delta) error {
@@ -757,7 +787,7 @@ func (s *Service) plan(
 
 	defer service.WithEmitter(nil)
 
-	return service.Plan(ctx, userID, content)
+	return service.PlanIn(ctx, userID, content, loc)
 }
 
 // replyTurn answers conversationally, with no plan and no approval.
