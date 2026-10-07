@@ -242,11 +242,16 @@
       table of the coming week. "In three weeks" or "next month" is still resolved
       by the model. Extending the table is cheap; extending it *and* validating
       it is the correct fix.
+* [ ] **The routing table is a snapshot, not a model.** It covers errands and
+      appointments. A request naming neither falls through to the model, which is
+      the right default but means a new kind of request has no rule until someone
+      adds one. Rows are deliberately few and specific.
 * [ ] **Retrieval quality is unmeasured.** The path works and is tenant-safe, but
       there is no labelled query set, so the similarity floor and `top_k` are
       reasoned defaults rather than tuned values.
-* [ ] **Plan steps still restate the request.** Titles are steered towards noun
-      phrases; steps remain close to a paraphrase of the user's own words.
+* [ ] **Plan steps still restate the request.** Titles and event descriptions are
+      steered towards noun phrases and the event carries its own detail; task steps
+      remain close to a paraphrase of the user's own words.
 
 ---
 

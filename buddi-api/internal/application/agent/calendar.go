@@ -30,7 +30,16 @@ type calendarArguments struct {
 // EncodeCalendarArguments renders a plan as calendar.create_event arguments.
 //
 // The mapping is deliberately narrow. Only the plan's own fields are read: a title
-// becomes a summary, a due time becomes a start, and the steps become a description.
+// becomes a summary, a due time becomes a start, the description becomes the event
+// detail, and a place and people become a location and an attendee list.
+//
+// Steps are not read here at all. They used to be the description — joined as a
+// numbered list — because they were the only free text a plan carried. That put
+// "1. Attend the dentist appointment" into the user's calendar as the event's
+// description: a restatement of the request, in a field meant for what the event
+// is. The schema no longer requires steps for an event, and the description now
+// carries the detail the user actually gave.
+//
 // Nothing else is available to copy, which is what keeps §10.2 true on this path
 // rather than only on the connector's side — the connector refuses note content in
 // its input, and there is no route by which such content could be put there.
@@ -49,7 +58,9 @@ func EncodeCalendarArguments(plan *planner.Plan) (json.RawMessage, error) {
 	arguments := calendarArguments{
 		Summary:     strings.TrimSpace(plan.Title),
 		StartAt:     plan.DueAt.UTC().Format(time.RFC3339),
-		Description: describeSteps(plan),
+		Description: strings.TrimSpace(plan.Description),
+		Location:    strings.TrimSpace(plan.Location),
+		Attendees:   plan.Attendees,
 	}
 
 	encoded, err := json.Marshal(arguments)
@@ -86,15 +97,17 @@ func calendarRationale(plan *planner.Plan) string {
 
 	builder.WriteString("Creates an event in your Google Calendar")
 
-	if len(plan.Steps) > 0 {
-		builder.WriteString(" describing these steps: ")
+	if detail := strings.TrimSpace(plan.Description); detail != "" {
+		builder.WriteString(": ")
+		builder.WriteString(detail)
 
-		steps := make([]string, 0, len(plan.Steps))
-		for _, step := range plan.Steps {
-			steps = append(steps, step.Description)
-		}
+		return builder.String()
+	}
 
-		builder.WriteString(strings.Join(steps, "; "))
+	// The time and place are already shown by the approval payload itself, so they are
+	// not repeated here. This is only the fallback for a plan that carried neither.
+	if plan.Location != "" {
+		builder.WriteString(" at " + plan.Location)
 	}
 
 	return builder.String()

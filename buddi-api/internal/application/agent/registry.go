@@ -167,6 +167,16 @@ func NewRegistry(options ...RegistryOption) (*Registry, error) {
 // best-effort guess. The tool's own validator runs here, before the proposal is
 // shown, so a payload that would be refused at execution is never displayed.
 func (r *Registry) Propose(plan *planner.Plan) (Proposal, error) {
+	// A clarification proposes nothing, so it must never fall through to the default
+	// binding. There is no tool that answers a question, and the default is a task —
+	// which would turn "Which doctor are you seeing?" into a task with that title.
+	//
+	// This is checked here rather than at the call site because the fallback below is
+	// total by design, and a total fallback is exactly what makes this easy to miss.
+	if plan.Intent == domain.PlanIntentClarification {
+		return Proposal{}, fmt.Errorf("agent: a clarification is a question, not a proposal")
+	}
+
 	binding, ok := r.bindings[plan.Intent]
 	if !ok {
 		binding, ok = r.bindings[r.defaultIntent]

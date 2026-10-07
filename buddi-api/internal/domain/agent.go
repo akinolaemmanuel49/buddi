@@ -68,11 +68,23 @@ const (
 
 	// PlanIntentCalendarEvent proposes creating a calendar event.
 	PlanIntentCalendarEvent PlanIntent = "calendar_event"
+
+	// PlanIntentClarification says the request cannot be carried out as stated
+	// because something the user knows is missing, and asks for it.
+	//
+	// It is an intent rather than a fallback or an error because the information is
+	// genuinely held by the user and no amount of guessing substitutes for it. A
+	// calendar event with no start time, or one naming a person the request never
+	// mentioned, cannot be completed honestly — so the honest output is a question,
+	// not a plan with invented fields.
+	//
+	// It never becomes a proposal. There is no tool that answers a question.
+	PlanIntentClarification PlanIntent = "clarification"
 )
 
 // AllPlanIntents is the order used to build the planner's schema and to validate
 // an intent.
-var AllPlanIntents = []PlanIntent{PlanIntentTask, PlanIntentCalendarEvent}
+var AllPlanIntents = []PlanIntent{PlanIntentTask, PlanIntentCalendarEvent, PlanIntentClarification}
 
 // IsValid reports whether i is a known intent.
 func (i PlanIntent) IsValid() bool {

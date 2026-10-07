@@ -106,8 +106,14 @@ export function MessageBubble({
   const isUser = message.role === "user";
 
   return (
-    <article className={`bubble ${isUser ? "from-user" : "from-assistant"}`}>
-      <div className="bubble-role">{isUser ? "You" : "Buddi"}</div>
+    <article
+      className={`bubble ${isUser ? "from-user" : "from-assistant"} ${
+        message.awaiting_answer ? "is-question" : ""
+      }`}
+    >
+      <div className="bubble-role">
+        {isUser ? "You" : message.awaiting_answer ? "Buddi is asking" : "Buddi"}
+      </div>
 
       <div className="bubble-body">
         {/* Before the first token there is nothing to show, so the bubble says which

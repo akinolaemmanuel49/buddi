@@ -208,14 +208,65 @@ Two things now prevent it:
    correct date. This catches the case where the model picks a plausible-looking
    date from the table that is still not the day asked for.
 
-The check is scoped to calendar events. A deadline saying "before Friday" is
-allowed to land on Thursday, so rejecting on weekday would break correct
-deadlines; a request naming two weekdays is skipped, because there is no single
-day to check against.
+### The check is scoped to calendar events
+
+A deadline saying "before Friday" is allowed to land on Thursday, so rejecting on
+weekday would break correct deadlines; a request naming two weekdays is skipped,
+because there is no single day to check against.
 
 Residual limitation: **there is no user timezone.** Dates and times are handled
 in UTC, so an evening event can render in a different local day. Until that is
 modelled, "Friday" means Friday in UTC.
+
+### Which tool a request goes to
+
+The routing table is in `planner/routing.go`, in code, because it is a decision with
+known failing cases and the cases are testable:
+
+| Kind | Examples | Goes to |
+| --- | --- | --- |
+| Errand | buy groceries, laundry, pick up, restock | task |
+| Appointment | dentist, meeting, haircut, flight, coffee with | calendar_event |
+| Appointment with no time | "I need to see the dentist" | **clarification** |
+
+Errands are listed before appointments deliberately, so "pick up the book I
+ordered for the dentist" stays an errand. A request nothing matched is reported as
+not confident and left to the model.
+
+Two details that turned out to matter:
+
+- Matching is **whole-word**. Substring matching made `maybe` an appointment via
+  `may`, and `bookstore` an errand via `buy`.
+- A **clock reading counts as a time**. `dentist at 3pm` names no weekday, so a
+  check that only looked for weekday names would call it untimed and ask a pointless
+  question.
+
+The table has the last word: a model that answers a routed request with a different
+intent is rejected and retried, with the complaint naming the required intent.
+
+### When something is missing, ask
+
+An appointment with no time in it cannot be completed honestly. Rather than invent a
+start time, the planner answers with `intent: clarification` and a question:
+
+> What time should I set "I need to see the dentist" for?
+
+That turn records **no run** — there is nothing to approve, and a run awaiting
+approval for a question would leave a card with no action behind it.
+
+The question is stored as the message content along with the **request it is about**
+(`messages.clarification_request`). The request is what makes the answer usable: a
+reply of "Tuesday at 4pm" names no dentist, so re-planning from it alone would lose
+the subject. The marker is cleared once answered.
+
+This is persisted rather than held in memory because the chat service is stateless
+per request. Without the column, "is a question still outstanding?" would be
+unanswerable after a refresh, and a reloaded thread would show the question as
+answered.
+
+The model is also asked to clarify when a named person or place is missing, and is
+prompted towards questions that are answerable in a sentence — "Which doctor are
+you seeing?", not "Please clarify your request".
 
 To stop the runtime from consuming the whole machine, cap it after starting:
 
@@ -318,6 +369,24 @@ Google rejects an event whose end is unset, and interprets a start with no
 offset against a timezone the request does not name. Both are now stated
 explicitly: times carry an offset, `timeZone` is `UTC`, and an event given a
 start and no end is closed one hour later.
+
+The plan's fields map onto the event directly, so the detail the user gave has
+somewhere to land:
+
+| Plan | Event | Notes |
+| --- | --- | --- |
+| `title` | `summary` | noun phrase: "Dentist Appointment" |
+| `due_at` | `start_at` | |
+| `description` | `description` | the point of the event, not its steps |
+| `location` | `location` | only if the user said where |
+| `attendees` | `attendees` | only the people the user named |
+
+`steps` is **not** read on this path. It used to be the description — joined as a
+numbered list — because it was the only free text a plan carried. That put
+`1. Attend the dentist appointment at 3pm` into the user's calendar as the event's
+description: a restatement of the request, in the field meant for what the event is.
+The schema no longer requires steps for an event, and the description carries the
+detail instead.
 
 On failure the error includes Google's **complete raw response** alongside the
 request id. Google's own messages name none of the fields that actually caused

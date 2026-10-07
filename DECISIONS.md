@@ -1041,3 +1041,105 @@ change — the discipline the commits are meant to make cheap to keep.
 containing more than one change is committed whole at the point the first of them
 needs it, so the history is a faithful grouping of the final states rather than a
 record of the order edits were typed in.
+## 13. Asking instead of guessing
+
+### 13.1 Missing information is answered with a question
+
+**Context.** I need to see the dentist is an appointment with no time in it. The
+planner had two options and both were wrong: invent a start time, or fall back to a
+task titled "Dentist appointment" with no time. The second is what produced the wrong
+date in the calendar in the first place, so falling back to it was not a safe default
+— it was the bug, reached a different way.
+
+**Decision.** The planner may answer with intent: clarification and a question. The
+chat service records the question and no run.
+
+**Why.** The information is held by the user and no amount of guessing substitutes for
+it. Inventing a start time does not fail visibly — it produces a well-formed event on
+a day the user never agreed to.
+
+No run is recorded because there is nothing to approve. A run awaiting approval for a
+question leaves a card on screen with no action behind it, which is worse than the
+question alone because it looks actionable.
+
+### 13.2 The question stores the request it is about
+
+**Decision.** messages.clarification_request holds the original request, not the
+question. The question is already the message content.
+
+**Why.** A reply of "Tuesday at 4pm" names no dentist. Re-planning from the reply
+alone loses the subject, which is the part the user is actually answering. The
+question is the thing being read; the request is the thing being resumed.
+
+The marker is cleared once answered, or the chain re-asks the same question forever —
+each reply leaving a new marker behind.
+
+### 13.3 The pending question is persisted, not remembered
+
+**Context.** The chat service is stateless per request; the answer arrives as a later
+message in a later request.
+
+**Decision.** The outstanding-question marker is a column.
+
+**Why.** "Is a question still outstanding?" has to be answerable from the transcript.
+Holding it in memory that dies with the connection means a refresh silently converts
+an outstanding question into a finished answer, and the user has no way to notice.
+
+This is the one place the transcript tree earns a column rather than being derived: the
+state is about *what the user owes us*, and it changes without a new message existing
+to hang it on.
+
+### 13.4 Which tool a request belongs to is decided in code
+
+**Context.** uy groceries was reaching Google Calendar. The model chose the intent
+from an enum whose own wording made 	ask sound like the catch-all.
+
+**Decision.** A routing table in planner/routing.go decides the intent, and the
+model is told the verdict rather than the rules. A model that answers a routed request
+with a different intent is rejected and retried.
+
+**Why.** The same reasoning as the date table: this is a decision with known failing
+cases, and the failing cases are testable. Leaving it in the prompt means the cases
+that already broke get fixed by rewording rather than by a test that fails when they
+break again.
+
+The cost is real and stated: a new kind of request has no rule until someone adds one.
+An unmatched request is reported as not confident rather than forced into the first
+row, so the table's coverage stays visible.
+
+### 13.5 Errands are matched before appointments
+
+**Why.** Ordering is the whole mechanism. "Pick up the book I ordered for the
+dentist" is an errand that mentions an appointment, and whichever row comes first
+decides it. Errands first because the failure mode is asymmetric: a stray event lands
+in somebody's real calendar, while a meeting quietly recorded as a task is merely
+missed.
+
+### 13.6 Steps are not the event description
+
+**Context.** The description in Google's calendar read 1. Attend the dentist
+appointment at 3pm.
+
+**Decision.** steps is required only of a task. The plan carries description,
+location and ttendees, and EncodeCalendarArguments reads those instead.
+
+**Why.** The description was not the model misbehaving. The encoder built it from
+describeSteps(plan), because steps were the only free text a plan carried and the
+connector's description was their only destination. The schema then required at
+least one step of every plan, so an appointment had to invent an action to satisfy it,
+and the invented action became the text in the user's calendar.
+
+Three separate fixes, and removing only one leaves the others in place: not requiring
+steps stops the invention, carrying description gives the detail somewhere to go, and
+stopping the encoder reading steps removes the restatement. location and ttendees
+exist for the same reason — a calendar with a separate place and a separate people list
+can be searched by them, and a sentence cannot be.
+
+### 13.7 A question nobody needed is rejected
+
+**Decision.** A clarification on a request the table matched as actionable is rejected
+and retried.
+
+**Why.** The user asked for something and is being handed a follow-up instead. The
+model will ask when it is unsure, and left unchecked that becomes a way of answering
+every request with a question — technically honest, and useless.

@@ -74,6 +74,15 @@ const (
 	// EventPlan reports the validated plan once generation has finished.
 	EventPlan EventType = "plan"
 
+	// EventClarification reports that the turn stopped to ask a question instead of
+	// proposing anything.
+	//
+	// It is a separate event rather than a plan with an empty body because the two
+	// need different things from a client: a plan wants an approval card, and a
+	// question wants a reply box. Sending one as the other produces an approval card
+	// with nothing to approve, or a plan that silently does nothing.
+	EventClarification EventType = "clarification"
+
 	// EventDone closes a successful turn.
 	EventDone EventType = "done"
 )
@@ -126,8 +135,28 @@ type Event struct {
 	// Fallback reports that the plan shown is deterministic rather than the model's.
 	Fallback bool
 
+	// Clarification is the question asked instead of a plan, on a clarification event.
+	Clarification *Clarification
+
 	// Content is the finished message text.
 	Content string
+}
+
+// Clarification is a turn that stopped to ask rather than propose.
+//
+// It carries the question as well as the request it is about, so a client can render
+// the question prominently while still being able to show what it was a question
+// about after the conversation has moved on.
+type Clarification struct {
+	// Question is what to put to the user.
+	Question string
+
+	// Request is the original request the question is about.
+	//
+	// Sent so a client can say "about which request?" in a conversation with more than
+	// one thing in it, and because it is what the next turn is re-planned against — a
+	// reply of "Tuesday at 4pm" names no dentist without it.
+	Request string
 }
 
 // RunRef points at the run a planned turn produced.
@@ -143,6 +172,11 @@ type Result struct {
 	Message      *domain.Message
 	Run          *RunRef
 	Fallback     bool
+
+	// Clarification is set when the turn asked a question instead of proposing
+	// anything. It is nil on every other turn, so a caller that ignores it is
+	// unaffected.
+	Clarification *Clarification
 }
 
 // Emitter receives turn events. Returning an error stops the turn.
@@ -494,6 +528,10 @@ func (s *Service) recordQuestion(
 
 // planTurn plans the request, streaming the plan as it is generated, then records a
 // run so the user can approve it.
+//
+// A turn that comes back as a clarification never records a run. There is nothing to
+// approve, and a run awaiting approval for a question would leave a card on screen
+// with no action behind it.
 func (s *Service) planTurn(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -502,12 +540,23 @@ func (s *Service) planTurn(
 	content string,
 	emit Emitter,
 ) (*Result, error) {
-	outcome, err := s.plan(ctx, userID, content, answer, emit)
+	// A reply to a pending question is planned against the request the question was
+	// about, not against the reply alone.
+	request, err := s.resolvePendingRequest(ctx, userID, conversation, question, content)
 	if err != nil {
 		return nil, err
 	}
 
-	record, err := s.runs.PlanFromOutcome(ctx, userID, content, outcome)
+	outcome, err := s.plan(ctx, userID, request, answer, emit)
+	if err != nil {
+		return nil, err
+	}
+
+	if outcome.Plan != nil && outcome.Plan.Intent == domain.PlanIntentClarification {
+		return s.clarifyTurn(ctx, conversation, answer, outcome, request, emit)
+	}
+
+	record, err := s.runs.PlanFromOutcome(ctx, userID, request, outcome)
 	if err != nil {
 		return nil, err
 	}
@@ -544,6 +593,118 @@ func (s *Service) planTurn(
 		Run:          ref,
 		Fallback:     outcome.UsedFallback,
 	}, nil
+}
+
+// clarifyTurn records a question instead of a plan.
+//
+// The message content is the question, so a client that renders nothing but text — a
+// transcript reloaded later, an export — still shows what was asked. The structured
+// form is on the event for a client that can style it.
+func (s *Service) clarifyTurn(
+	ctx context.Context,
+	conversation *domain.Conversation,
+	answer *domain.Message,
+	outcome *planner.Outcome,
+	request string,
+	emit Emitter,
+) (*Result, error) {
+	question := strings.TrimSpace(outcome.Plan.Question)
+
+	if question == "" {
+		// parsePlan rejects a clarification with no question, so this cannot be
+		// reached through the planner. It is here because the plan may have come from
+		// a Planner implementation this package does not control.
+		return nil, errors.New("chat: the planner returned a clarification with no question")
+	}
+
+	if err := s.complete(ctx, conversation, answer, question, outcome.Reasoning, uuid.Nil); err != nil {
+		return nil, err
+	}
+
+	// The request is stored so the next reply can be re-planned with the subject
+	// attached. "Tuesday at 4pm" on its own names no dentist.
+	answer.ClarificationRequest = &request
+
+	if err := s.messages.Update(ctx, answer); err != nil {
+		return nil, err
+	}
+
+	clarification := &Clarification{Question: question, Request: request}
+
+	if err := emit(Event{
+		Type:               EventClarification,
+		ConversationID:     conversation.ID,
+		MessageID:          answer.ID,
+		Clarification:      clarification,
+		ReasoningComplete:  outcome.Reasoning,
+		ReasoningAvailable: strings.TrimSpace(outcome.Reasoning) != "",
+		Content:            question,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := emit(Event{
+		Type:           EventDone,
+		ConversationID: conversation.ID,
+		MessageID:      answer.ID,
+		Clarification:  clarification,
+		Content:        question,
+	}); err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		Conversation:  conversation,
+		Message:       answer,
+		Fallback:      outcome.UsedFallback,
+		Clarification: clarification,
+	}, nil
+}
+
+// resolvePendingRequest returns what this turn should actually be planned from.
+//
+// When the message being answered is a pending clarification, that is the original
+// request followed by the user's reply. Planning from the reply alone loses the
+// subject: "Tuesday at 4pm" is answerable only alongside "I need to see the dentist".
+//
+// Otherwise the reply is planned from itself.
+func (s *Service) resolvePendingRequest(
+	ctx context.Context,
+	userID uuid.UUID,
+	conversation *domain.Conversation,
+	question *domain.Message,
+	content string,
+) (string, error) {
+	if question.ParentID == nil {
+		return content, nil
+	}
+
+	parent, err := s.messages.GetByID(ctx, userID, *question.ParentID)
+	if err != nil {
+		// The parent was read a moment ago to record this message, so a miss here is
+		// not a normal condition and treating it as one would silently plan from the
+		// wrong text.
+		return "", err
+	}
+
+	if parent.ClarificationRequest == nil || strings.TrimSpace(*parent.ClarificationRequest) == "" {
+		return content, nil
+	}
+
+	pending := strings.TrimSpace(*parent.ClarificationRequest)
+
+	// Clear the marker now that it has been answered.
+	//
+	// Leaving it set would keep the thread looking like it was waiting for a reply to a
+	// question already answered, so a reloaded transcript would offer a second reply box
+	// against the same question.
+	parent.ClarificationRequest = nil
+
+	if err := s.messages.Update(ctx, parent); err != nil {
+		return "", err
+	}
+
+	return pending + " " + strings.TrimSpace(content), nil
 }
 
 // plan runs the planner with an emitter wired to this turn's events.
@@ -671,6 +832,11 @@ func (s *Service) replyTurn(
 }
 
 // complete writes the finished message and moves the conversation head onto it.
+// complete finishes an assistant message with its content, reasoning and run.
+//
+// runID is uuid.Nil for a turn that produced no run — a question rather than a
+// proposal — and is treated as absent rather than stored as a zero uuid, so a
+// clarification is never mistaken for one awaiting approval.
 func (s *Service) complete(
 	ctx context.Context,
 	conversation *domain.Conversation,
@@ -684,7 +850,12 @@ func (s *Service) complete(
 	}
 
 	answer.WithReasoning(reasoning)
-	answer.WithRun(runID)
+
+	// A zero uuid is absence, not a link. Storing it would put a dangling run_id on a
+	// message that produced no run.
+	if runID != uuid.Nil {
+		answer.WithRun(runID)
+	}
 
 	if err := s.messages.Update(ctx, answer); err != nil {
 		return err

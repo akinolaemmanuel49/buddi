@@ -567,6 +567,29 @@ button.icon:hover:not(:disabled) {
   border-bottom-left-radius: var(--r-xs);
 }
 
+/*
+ * A question is not an answer, and it looks like one otherwise: same bubble, same
+ * speaker, finished-looking text. The accent edge and the label above it are what
+ * make "something is waiting on you" visible without the message reading as an
+ * error.
+ */
+.bubble.is-question {
+  border-color: var(--accent-line);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.bubble.is-question .bubble-role {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.clarification-hint {
+  margin: var(--sp-1) 0 0;
+  font-size: 0.76rem;
+  opacity: 0.6;
+}
+
 .bubble-role {
   font-size: 0.68rem;
   font-weight: 620;
