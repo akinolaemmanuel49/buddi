@@ -1143,3 +1143,92 @@ and retried.
 **Why.** The user asked for something and is being handed a follow-up instead. The
 model will ask when it is unsure, and left unchecked that becomes a way of answering
 every request with a question — technically honest, and useless.
+## 14. Time
+
+### 14.1 "Next week" is the second occurrence, not the first
+
+**Context.** Reported: "I used next week which should be the 16th but it used the 9th."
+
+**Decision.** The date table lists each weekday's next *two* occurrences, and the
+validator resolves a weekday reference to one exact date rather than a day name.
+
+**Why.** Part of this was the validator rather than the model. The table held seven
+days, so the 16th was not in it at all, and checkWeekday computed the next Friday
+and named it in the rejection. A plan dated correctly was therefore refused in
+favour of the wrong one. A check that cannot represent the answer is worse than no
+check, because it does not merely fail to catch the error — it produces it.
+
+"Next" moves the target a week; a bare weekday stays on the soonest occurrence. That
+asymmetry is deliberate: being one day out is a much smaller error than moving an
+appointment a whole week.
+
+The complaint names a date rather than a weekday because it goes back into the retry
+prompt, and "the request asked for Friday" is not actionable when two Fridays are in
+play.
+
+**Known limit.** "In three weeks" and "next month" still reach the model. "The week
+after next" is explicitly excluded from the week-shifting rule rather than being
+silently treated as one week.
+
+### 14.2 The time zone belongs to the person, not the deployment
+
+**Context.** Reported: "the time set is 4PM instead of 3PM". The plan's instant was
+15:00:00Z, written with 	imeZone: "UTC".
+
+**Decision.** The browser's IANA zone travels with the turn, through the plan, and into
+the calendar write. It is an argument rather than configuration.
+
+**Why.** "Friday at 3pm" means Friday and three in the afternoon where the user is
+standing. Configuration would make that a property of the deployment, which is wrong for
+anything with more than one user and still wrong for one person who travels.
+
+**Why it showed up as an hour.** Google stores an instant and renders it in the
+*calendar's* zone. 15:00Z is 16:00 in London while BST is in force, so the payload was
+correct and the calendar was not. Nothing in the write path was lying, which is why this
+went uncaught until a human looked at their own calendar.
+
+### 14.3 The zone is recorded on the plan
+
+**Decision.** 	ime_zone on the plan, sent to the calendar alongside a local time.
+
+**Why.** A bare instant is ambiguous by construction: the same number is 3pm in London
+and 11am in New York. Recording the zone that produced it makes the stored value
+interpretable after the fact, and it is what lets the write send a local time with a
+matching zone so the two agree by construction rather than by the calendar's default
+happening to be right.
+
+### 14.4 Absence of a zone is not a claim of UTC
+
+**Decision.** A plan with no recorded zone does not write a 	imezone field. An
+unrecognised zone name is not written either.
+
+**Why.** Sending "UTC" because nothing better is known states something not known to
+be true, and stating a wrong zone is the original bug. Omitting the field lets Google
+use the calendar's own zone, which is at least consistent with how the user sees every
+other event they own.
+
+An unknown name is dropped rather than refused because it arrives from a browser: the
+realistic failure is a zone renamed in a future tzdata release, and refusing the turn
+would stop the user doing anything at all. The fallback is UTC, which is wrong by at
+most an hour.
+
+### 14.5 The weekday check runs in the user's zone
+
+**Why.** In UTC a Thursday-evening appointment belongs to Friday for anyone east of
+Greenwich. Checking in UTC rejects the right date and accepts the wrong one — the same
+class of bug as 14.1, and the reason the zone is threaded through the validator rather
+than only through the prompt.
+
+### 14.6 Check the encoding of what a shell writes
+
+**Context.** Three em dashes in planner/service.go were corrupted to
+U+00E2 U+20AC U+201D — an em dash's UTF-8 bytes read as CP1252 — by a PowerShell text
+write.
+
+**Why it is recorded.** The file still compiled, all tests passed, and the damage was
+invisible in a diff rendered through the same console. It was found by counting non-ASCII
+code points and printing them as numbers, not by reading.
+
+The lesson is narrow and worth keeping: a tool that writes files should be checked by
+something other than the tool that read them. gofmt was no help here, because
+corrupted bytes inside a comment are perfectly valid Go.

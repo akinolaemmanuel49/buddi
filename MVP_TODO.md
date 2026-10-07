@@ -234,14 +234,13 @@
 
 ### Known gaps
 
-* [ ] **No user timezone.** Dates and times are handled and stored in UTC, so an
-      evening event can render on the wrong local day. This is the most likely
-      remaining cause of a "wrong date" report and it is a real bug rather than
-      a display artifact. Highest-priority open item.
-* [ ] **Relative dates beyond this week.** The planner prompt carries an explicit
-      table of the coming week. "In three weeks" or "next month" is still resolved
-      by the model. Extending the table is cheap; extending it *and* validating
-      it is the correct fix.
+* [x] **User time zone.** The browser sends its IANA zone with every turn; the date
+      table, the weekday check and the calendar write all use it. Resolved the
+      "4pm when I asked for 3pm" report, which was a UTC instant rendered in
+      London's BST.
+* [ ] **Relative dates beyond this week.** The planner prompt carries the next two
+      occurrences of each weekday. "In three weeks" or "next month" is still resolved
+      by the model, and a request naming only a month has no rule at all.
 * [ ] **The routing table is a snapshot, not a model.** It covers errands and
       appointments. A request naming neither falls through to the model, which is
       the right default but means a new kind of request has no rule until someone

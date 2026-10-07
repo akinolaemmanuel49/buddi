@@ -214,9 +214,64 @@ A deadline saying "before Friday" is allowed to land on Thursday, so rejecting o
 weekday would break correct deadlines; a request naming two weekdays is skipped,
 because there is no single day to check against.
 
-Residual limitation: **there is no user timezone.** Dates and times are handled
-in UTC, so an evening event can render in a different local day. Until that is
-modelled, "Friday" means Friday in UTC.
+### "Friday" and "next Friday" are different dates
+
+Each weekday is listed with its next **two** occurrences, because a table holding
+only the first cannot express the second:
+
+```
+Today is 2026-10-07 (Wednesday). Tomorrow is 2026-10-08 (Thursday).
+
+Each day below lists its next two occurrences: the first is what a plain
+reference to that day means, the second is what "next <day>" and "next week" mean.
+  Sunday:     2026-10-11, 2026-10-18
+  Monday:     2026-10-12, 2026-10-19
+  ...
+  Friday:     2026-10-09, 2026-10-16
+```
+
+A wrong date is rejected and retried, and the complaint names **one exact date**
+rather than a day name — "the request asked for Friday" is not actionable when two
+Fridays are in play.
+
+Two failure modes, both found the hard way and now pinned by tests:
+
+- **"Next week" resolved to the 9th instead of the 16th.** Not only a model error:
+  the validator computed the next Friday and named it in the rejection, so a
+  *correct* date was refused in favour of the wrong one. A check that cannot
+  represent the answer is worse than no check.
+- **A bare weekday stays on the soonest occurrence.** Deliberate — being one day
+  out beats moving an appointment a whole week.
+
+### Times are the user's, not the server's
+
+The browser sends its IANA zone with every turn, and it is carried through the
+plan rather than being configuration, because it is a property of the person and
+not of the deployment.
+
+This was reported as **"the calendar says 4pm when I asked for 3pm"**. The cause
+was that the plan's instant was flattened to `15:00Z` and written with
+`timeZone: "UTC"`. Google stores an instant and renders it in the *calendar's*
+zone, so during BST the user saw 16:00 — the payload looked correct and the
+calendar was not.
+
+Three consequences, all load-bearing:
+
+- The date table is built in the user's zone. A Friday in UTC near midnight is a
+  Thursday for the user.
+- The weekday check compares in the user's zone. A Thursday-evening appointment
+  belongs to Friday for anyone east of Greenwich, so checking in UTC rejects the
+  right date and accepts the wrong one.
+- The calendar write sends a **local time with a matching zone**, so the two agree
+  by construction rather than by the calendar's default happening to match.
+
+The zone is recorded on the plan (`time_zone`), because a bare instant is
+ambiguous by construction: the same number is 3pm in London and 11am in New York.
+
+An unknown zone falls back to UTC, and a plan with no recorded zone **does not
+claim to be UTC** — stating a zone not known to be true is the original bug.
+Omitting it lets Google use the calendar's own, which is at least what the user
+sees everywhere else.
 
 ### Which tool a request goes to
 
