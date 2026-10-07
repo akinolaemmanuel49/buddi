@@ -1,0 +1,29 @@
+# Normalise line endings in the repository itself.
+#
+# Go and TypeScript tooling both treat CRLF as a formatting difference, so
+# core.autocrlf rewriting them on checkout makes `gofmt -l` report the whole tree
+# and produces noisy diffs. Everything is stored and checked out as LF; Windows
+# editors handle LF fine.
+
+* text=auto eol=lf
+
+*.go   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+
+# Not text.
+*.exe  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
