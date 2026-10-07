@@ -1,0 +1,88 @@
+name: buddi
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: buddi-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: buddi
+      POSTGRES_PASSWORD: buddi
+      POSTGRES_DB: buddi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buddi -d buddi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # The model runtime is containerised like everything else. No GPU is assumed and
+  # none is requested, so inference falls back to the CPU. Pulled models live in a
+  # volume, otherwise every recreate would re-download several gigabytes.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: buddi-ollama
+    restart: unless-stopped
+    # Kept out of the default profile: `docker compose up -d db` should not pull a
+    # multi-gigabyte image for people who are only working on the API.
+    profiles: [llm]
+    environment:
+      # Context length is the largest memory lever because the KV cache grows with
+      # it, and on CPU it is also the main latency lever.
+      OLLAMA_CONTEXT_LENGTH: "8192"
+      # q8_0 halves KV cache memory. It engages on CPU as well as on CUDA/Metal,
+      # unlike flash attention, which needs a supported accelerator and is
+      # therefore deliberately not enabled here.
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      # One resident model at a time. Each extra one is another few GB of RAM.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      # CPU inference is slow enough that unloading a model between turns costs
+      # more than leaving it warm for the length of a conversation.
+      OLLAMA_KEEP_ALIVE: 2m
+      # One request at a time. Parallel requests would just thrash the CPU.
+      OLLAMA_NUM_PARALLEL: "1"
+    ports:
+      # Published so a host-run API can reach it on 127.0.0.1:11434. Containers on
+      # the same network should use http://ollama:11434 instead.
+      - "11434:11434"
+    volumes:
+      - ollamadata:/root/.ollama
+    healthcheck:
+      # `ollama list` is guaranteed to exist in the image; curl is not.
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    container_name: buddi-collector
+    restart: unless-stopped
+    profiles: [obs]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: buddi-jaeger
+    restart: unless-stopped
+    profiles: [obs]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+volumes:
+  pgdata:
+  ollamadata:

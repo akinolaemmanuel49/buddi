@@ -1,0 +1,15 @@
+-- Nothing to undo.
+--
+-- The up migration derives a label from evidence that still exists, so it cannot be
+-- inverted: once a note is labelled 'indexed' there is no way to tell whether the
+-- chunks that justified it were written before or after this migration ran.
+--
+-- Resetting the labels here would be a lie in both directions. Forcing everything to
+-- 'pending' would queue every searchable note for re-embedding; forcing everything to
+-- 'indexed' would mark notes that have never been embedded as searchable. Neither
+-- restores a prior state that was never recorded, and both are silently wrong in a way
+-- a user would eventually discover as missing search results.
+--
+-- Rolling migration 000003 back drops the columns and the labels with them, which is
+-- the only reversal this backfill actually needs.
+SELECT 1;
