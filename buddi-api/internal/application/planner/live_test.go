@@ -14,6 +14,7 @@ package planner_test
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,72 @@ func TestLiveResolvesRelativeDatesToTheUsersOwnClock(t *testing.T) {
 
 			if got := outcome.Plan.DueAt.In(loc).Format("2006-01-02 15:04"); got != tc.want {
 				t.Errorf("got %s, want %s in the user's own zone (%s)", got, tc.want, tc.note)
+			}
+		})
+	}
+}
+
+// TestLiveCarriesTheDetailOfAnEvent is the live check on the fields the model will not
+// fill by itself.
+//
+// description and attendees came back empty from every probe, which is what sent the
+// detail into the title and produced "Dentist Appointment with Dr Ada Okafor" as a
+// headline. Prompt wording was tried twice and a retry complaint was tried once; the
+// complaint was worse. They are derived in code now, and this asserts the result the
+// model was previously dropping.
+func TestLiveCarriesTheDetailOfAnEvent(t *testing.T) {
+	service := livePlannerService(t)
+
+	loc, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+
+	cases := []struct {
+		goal      string
+		attendees []string
+		note      string
+	}{
+		{"dentist appointment next Friday at 3pm with Dr Ada Okafor", []string{"Dr Ada Okafor"}, "a named doctor"},
+		{"dinner with Sam at the Italian place next Friday at 8pm", []string{"Sam"}, "a named friend"},
+		{"haircut next Friday at 10am", nil, "nobody named, so none invented"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	for _, tc := range cases {
+		t.Run(tc.goal, func(t *testing.T) {
+			outcome, err := service.PlanIn(ctx, uuid.New(), tc.goal, loc)
+			if err != nil {
+				t.Fatalf("PlanIn: %v", err)
+			}
+
+			p := outcome.Plan
+
+			t.Logf("title=%q attendees=%v location=%q description=%q steps=%d",
+				p.Title, p.Attendees, p.Location, p.Description, len(p.Steps))
+
+			if len(p.Attendees) != len(tc.attendees) {
+				t.Fatalf("attendees = %v, want %v (%s)", p.Attendees, tc.attendees, tc.note)
+			}
+
+			for i, want := range tc.attendees {
+				if p.Attendees[i] != want {
+					t.Errorf("attendee = %q, want %q (%s)", p.Attendees[i], want, tc.note)
+				}
+			}
+
+			// The title must not have absorbed the name instead. It was the symptom of
+			// the model having nowhere else to put it.
+			for _, want := range tc.attendees {
+				if strings.Contains(p.Title, want) {
+					t.Errorf("title %q still contains the attendee %q", p.Title, want)
+				}
+			}
+
+			if len(p.Steps) != 0 {
+				t.Errorf("a calendar event invented steps %v", p.Steps)
 			}
 		})
 	}

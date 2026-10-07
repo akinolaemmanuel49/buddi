@@ -1232,3 +1232,65 @@ code points and printing them as numbers, not by reading.
 The lesson is narrow and worth keeping: a tool that writes files should be checked by
 something other than the tool that read them. gofmt was no help here, because
 corrupted bytes inside a comment are perfectly valid Go.
+### 14.7 A worked example in a prompt becomes data
+
+**Context.** The planner prompt illustrated the description field with "Annual check-up
+with Dr Ada Okafor".
+
+**Live result.** Asked for "dentist next Friday at 3pm, it's my annual check-up" —
+which names no doctor — the model answered with the title "Annual check-up with Dr Ada
+Okafor". It had taken the name from the instruction.
+
+**Why.** This is the failure already recorded in 9.10 for retrieved notes: a concrete
+example in a prompt is an invitation to copy it. The mitigation there was to number the
+chunks rather than label them. It was not applied here.
+
+**Decision.** No prompt example contains a name, a place or a date. Instructions say
+what to extract and add that any name, place or detail must come from the request itself.
+
+**Why the instruction alone was not enough.** The first version of the fix did carry
+"Do not put a person's name in the title" and the model stopped putting the name in the
+title, which suggests it read that line. It did not stop inventing one, because nothing
+told it the name had no source. Removing the example is what removed the name.
+
+**Worth keeping in mind.** Anything a prompt names is a candidate answer. This was found
+only by driving the real model; a fake generator returns whatever the test says it
+returns and would never have produced it.
+
+### 14.8 Two fields are derived, because the model will not fill them
+
+**Context.** Live probes show the model filling title, due_at and location reliably and
+leaving description and attendees empty, every time.
+
+**Decision.** Attendees are derived from the request in code when the model leaves them
+empty. Description is not derived at all.
+
+**Why three prompt attempts did not work.** Describing the fields better: ignored.
+Saying so again, more firmly: ignored. Rejecting the plan and naming the missing person
+in a retry: worse — the second attempt put the whole request into the title and filled
+less than the first.
+
+That last result is the useful one. The retry mechanism is the thing that fixed the
+weekday and the hour, and it fails here. Being told "the request names Ada, put her in
+attendees" appears to push the model away from the fields rather than towards them, and
+the plan it produced was a strictly worse answer than the one it was retrying.
+
+So this is a capability limit, not a wording problem, and it is solved the way the other
+model limits here have been: in code. The date table, the weekday check and the routing
+table are all decisions the model could not make, and this is the same kind.
+
+**Why attendees are safe to derive.** The extraction only reads words the user typed, so
+it cannot invent a person, and that is the property that matters here because the result
+is written to somebody's real calendar. It stops at the next clause, so "dinner with Sam
+at the Italian place" yields Sam and not the restaurant. It is a fallback rather than an
+override, so a model-supplied attendee is never replaced by a cruder one.
+
+**Why description is left alone.** A description would have to be assembled from a
+word-by-word scrape of the request, producing plausible-looking prose with nothing to
+check it against. An empty field the user can see is better than a sentence that might
+be wrong. The detail is not lost: location and attendees carry it structurally, and
+Google renders both.
+
+**Why the derived value is reported.** It appears in the plan notes. A plan that was
+partly derived and one the model produced entirely look identical otherwise, and the
+difference is worth being able to see.
