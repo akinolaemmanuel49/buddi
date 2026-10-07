@@ -287,11 +287,16 @@ func TestAnApprovedCalendarProposalReachesTheProviderUnchanged(t *testing.T) {
 		t.Errorf("provider start_at = %q, want %q", sent.StartAt, want)
 	}
 
-	// The description is the planner's own words about the plan's steps.
-	for _, step := range []string{"Announce in #release", "Tag the release branch"} {
-		if !strings.Contains(sent.Description, step) {
-			t.Errorf("description = %q, want it to mention %q", sent.Description, step)
-		}
+	// The description is the planner's own words about the event, never a list of the
+	// steps. It used to be describeSteps(plan), which put "1. Announce in #release" into
+	// the user's calendar: a restatement of the request, in the field meant for what the
+	// event actually is.
+	if strings.Contains(sent.Description, "1.") || strings.Contains(sent.Description, "Announce in #release") {
+		t.Errorf("description = %q, want the event detail rather than the steps", sent.Description)
+	}
+
+	if !strings.Contains(sent.Description, "The freeze agreed with the release team.") {
+		t.Errorf("description = %q, want the plan's own description", sent.Description)
 	}
 
 	// Nothing is invented to fill the event in. The encoder reads the plan's own fields
