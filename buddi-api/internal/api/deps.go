@@ -90,12 +90,6 @@ type ChatService interface {
 	DeleteConversation(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
-// TokenIssuer verifies access tokens. It is a separate dependency from the
-// authenticator so the middleware can stay narrow.
-type TokenVerifier interface {
-	Verify(token string) (auth.Claims, error)
-}
-
 // userKey carries the authenticated user on a request context.
 type userKey struct{}
 

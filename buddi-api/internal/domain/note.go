@@ -14,12 +14,10 @@ import (
 // Note length limits. Content is unbounded on purpose since it is the primary
 // input to RAG, but the title has to stay a title.
 const (
-	MaxNoteTitle       = 300
-	MaxNoteTags        = 25
-	MaxTagLength       = 50
-	NoteSourceManual   = "manual"
-	NoteSourceAgent    = "agent"
-	NoteSourceImported = "imported"
+	MaxNoteTitle     = 300
+	MaxNoteTags      = 25
+	MaxTagLength     = 50
+	NoteSourceManual = "manual"
 )
 
 // Note is a piece of personal information the user has stored.

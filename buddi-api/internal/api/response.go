@@ -56,10 +56,6 @@ func Unauthorized(message string) *Error {
 	return NewError(http.StatusUnauthorized, "unauthorized", message)
 }
 
-func Forbidden(message string) *Error {
-	return NewError(http.StatusForbidden, "forbidden", message)
-}
-
 func NotFound(message string) *Error {
 	return NewError(http.StatusNotFound, "not_found", message)
 }

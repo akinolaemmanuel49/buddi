@@ -492,11 +492,3 @@ func unwrapURLError(err error) error {
 
 	return err
 }
-
-func bytesReader(body []byte) io.Reader {
-	if body == nil {
-		return nil
-	}
-
-	return bytes.NewReader(body)
-}

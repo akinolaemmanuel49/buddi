@@ -25,10 +25,6 @@ type HTTPServer struct {
 	server *http.Server
 }
 
-func NewHTTPServer(addr string, handler http.Handler) Server {
-	return NewHTTPServerWithOptions(addr, handler, Options{})
-}
-
 type Options struct {
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration

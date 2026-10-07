@@ -710,13 +710,6 @@ func routingBlock(route Route) string {
 		"user would know is missing."
 }
 
-// weekdayWindow is how many days ahead the date table covers.
-//
-// A week is the longest reference a request plausibly makes on its own: "next Tuesday"
-// reaches at most seven days past today. Beyond that a request is naming a real date,
-// which the model can already read.
-const weekdayWindow = 7
-
 // dateContext renders the dates a small model cannot reliably work out for itself.
 //
 // The model is given the current instant and asked to resolve "Friday" against it, and
@@ -724,12 +717,6 @@ const weekdayWindow = 7
 // eight days out. So the arithmetic is done here instead, and the model is left to
 // choose from a table rather than to compute one. Choosing from options is a far easier
 // task, and the table cannot be miscalculated.
-// dateContext renders the dates a small model cannot reliably work out for itself.
-//
-// The model is given the current instant and asked to resolve "Friday" against it, and
-// it cannot: asked on a Wednesday for a Friday appointment it answered with a Thursday
-// eight days out. So the arithmetic is done here instead, and the model is left to
-// choose from a table rather than to compute one.
 //
 // Each weekday is listed with its next *two* occurrences, because "Friday" and "next
 // Friday" are different dates and a table holding only the first one cannot express the
@@ -939,20 +926,6 @@ func (s *Service) ground(
 	return chunks
 }
 
-// weekdayNames are the words a request uses for a day, mapped to time.Weekday.
-//
-// Abbreviations are listed alongside the full names because both appear in requests,
-// and checkWeekday counts distinct days rather than matches so that one reference to
-// "friday" is not read as two.
-var weekdayNames = map[string]time.Weekday{
-	"sunday": time.Sunday, "mon": time.Monday,
-	"sund": time.Sunday, "monday": time.Monday,
-	"tuesday": time.Tuesday, "tues": time.Tuesday,
-	"wednesday": time.Wednesday,
-	"thursday":  time.Thursday, "thur": time.Thursday,
-	"friday": time.Friday, "saturday": time.Saturday,
-}
-
 // weekdayByName is the subset used for counting: one entry per day, so a request
 // naming a day twice is not mistaken for naming two days.
 var weekdayByName = map[string]time.Weekday{
@@ -1002,7 +975,7 @@ func (s *Service) checkWeekday(goal string, loc *time.Location, plan *Plan) stri
 	)
 
 	for name, day := range weekdayByName {
-		if containsWeekday(lower, name) {
+		if containsWord(lower, name) {
 			found = day
 			names++
 		}
@@ -1035,31 +1008,6 @@ func (s *Service) checkWeekday(goal string, loc *time.Location, plan *Plan) stri
 		expected.Format("2006-01-02"), found.String(),
 		expected.Format("2006-01-02"),
 	)
-}
-
-// containsWeekday reports whether text contains word as a whole word.
-func containsWeekday(text, word string) bool {
-	for i := 0; i+len(word) <= len(text); i++ {
-		if !strings.HasPrefix(text[i:], word) {
-			continue
-		}
-
-		before := byte(' ')
-		if i > 0 {
-			before = text[i-1]
-		}
-
-		after := byte(' ')
-		if i+len(word) < len(text) {
-			after = text[i+len(word)]
-		}
-
-		if !isWordByte(before) && !isWordByte(after) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func isWordByte(b byte) bool {
@@ -1511,14 +1459,4 @@ func stripCodeFence(raw string) (string, bool) {
 	trimmed = strings.TrimSuffix(strings.TrimSpace(trimmed), "```")
 
 	return strings.TrimSpace(trimmed), true
-}
-
-func joinPriorities() string {
-	names := make([]string, 0, len(domain.AllTaskPriorities))
-
-	for _, p := range domain.AllTaskPriorities {
-		names = append(names, string(p))
-	}
-
-	return strings.Join(names, ", ")
 }
