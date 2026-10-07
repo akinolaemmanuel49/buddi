@@ -90,6 +90,16 @@ export type Message = {
   reasoning?: string | null;
   run_id?: string | null;
   created_at: string;
+
+  /**
+   * This message asked a question instead of answering, and nothing has answered it
+   * yet.
+   *
+   * Needed on reload, not just during a live stream: without it a reloaded thread
+   * shows an outstanding question as an ordinary line of text, and the user has no
+   * way to tell that something is waiting on them.
+   */
+  awaiting_answer?: boolean;
 };
 
 export type ConversationDetail = {
@@ -108,7 +118,34 @@ export type ChatMode = "plan" | "chat";
  */
 export type ChatModeOption = ChatMode | "auto";
 
-export type ChatEventType = "start" | "reasoning" | "delta" | "plan" | "done" | "error";
+export type ChatEventType =
+  | "start"
+  | "reasoning"
+  | "delta"
+  | "plan"
+  | "clarification"
+  | "done"
+  | "error";
+
+/**
+ * A question the assistant asked instead of proposing anything.
+ *
+ * Kept separate from a plan because the two need different things from this layer: a
+ * plan wants an approval card, and a question wants a reply. Rendering one as the
+ * other produces an approval card with nothing to approve.
+ */
+export type Clarification = {
+  question: string;
+
+  /**
+   * The request the question is about.
+   *
+   * Shown so the user can tell which of several things in the conversation is being
+   * asked about. The server re-plans against it, so a reply of "Tuesday at 4pm" still
+   * arrives as a dentist appointment.
+   */
+  request?: string;
+};
 
 export type ChatEvent = {
   type: ChatEventType;
@@ -123,6 +160,7 @@ export type ChatEvent = {
   reasoning_complete?: string;
   content?: string;
   fallback?: boolean;
+  clarification?: Clarification;
   run?: { id: string; status: string };
 };
 

@@ -7,6 +7,7 @@ import {
   type CalendarOutcome,
   type ChatEvent,
   type ChatModeOption,
+  type Clarification,
   type Connection,
   type Conversation,
   type Message,
@@ -38,6 +39,15 @@ type Pending = {
   reasoning: string;
   run: { id: string; status: string } | null;
   fallback: boolean;
+
+  /**
+   * Set when the turn asked a question instead of proposing anything.
+   *
+   * Held separately from the content because the two render differently: a question
+   * needs to look answerable, and it carries no run, so an approval card would have
+   * nothing behind it.
+   */
+  clarification: Clarification | null;
 };
 
 /**
@@ -202,6 +212,7 @@ export function Chat({
       reasoning: "",
       run: null,
       fallback: false,
+      clarification: null,
     };
 
     setPending(answer);
@@ -409,6 +420,17 @@ export function Chat({
                   status={message.run_id ? runStates[message.run_id] : undefined}
                   onDecide={decide}
                 />
+                {/*
+                  A question rather than a proposal. The reply box is the composer
+                  below either way, so what this adds is making it clear that something
+                  is being waited on — otherwise an outstanding question reads as a
+                  finished answer.
+                */}
+                {message.awaiting_answer ? (
+                  <p className="clarification-hint">
+                    Answering this will finish the request it is about.
+                  </p>
+                ) : null}
               </div>
             ))}
 
@@ -485,12 +507,24 @@ function applyEvent(pending: Pending, event: ChatEvent): Pending {
         fallback: Boolean(event.fallback),
       };
 
+    case "clarification":
+      // The turn stopped to ask rather than to propose. The question arrives as the
+      // message content, so this only records that it was a question, which is what
+      // lets it be styled and lets a reloaded thread show the same thing.
+      return {
+        ...pending,
+        content: event.content ?? pending.content,
+        reasoning: event.reasoning_complete || pending.reasoning,
+        clarification: event.clarification ?? pending.clarification,
+      };
+
     case "done":
       return {
         ...pending,
         content: event.content || pending.content,
         reasoning: event.reasoning_complete || pending.reasoning,
         run: event.run ?? pending.run,
+        clarification: event.clarification ?? pending.clarification,
       };
 
     default:
@@ -520,7 +554,7 @@ function commitPending(messages: Message[], pending: Pending): Message[] {
 
   // Only kept when there is something to show: an empty assistant bubble with nothing
   // in it is worse than no bubble, because it looks like a rendering fault.
-  if ((pending.content || pending.run) && !next.some((m) => m.id === pending.id)) {
+  if ((pending.content || pending.run || pending.clarification) && !next.some((m) => m.id === pending.id)) {
     next.push({
       id: pending.id || "pending-answer",
       conversation_id: pending.conversationId,
@@ -528,6 +562,9 @@ function commitPending(messages: Message[], pending: Pending): Message[] {
       content: pending.content,
       reasoning: pending.reasoning || null,
       run_id: pending.run?.id ?? null,
+      // Carried so a question keeps looking answerable even when the server's copy
+      // could not be fetched.
+      awaiting_answer: Boolean(pending.clarification),
       created_at: new Date().toISOString(),
     });
   }
